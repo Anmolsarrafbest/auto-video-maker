@@ -120,9 +120,43 @@ class WhiteDwarf(Scene):
         self.wait(1.05)
 
 
+class MoonDistance(Scene):
+    def construct(self):
+        title = Text("THE DRIFTING MOON", color="#E2E0FF", font_size=32).move_to((0, 3.1, 0))
+        earth = Circle(1.05, color="#7FC8F8", fill_color="#2A5B8C", fill_opacity=1).move_to((-3.6, 0, 0))
+        moon = Circle(.46, color="#DCD8FF", fill_color="#8E8AB5", fill_opacity=1).move_to((.8, 0, 0))
+        ruler = Line((-2.4, -.95, 0), (.8, -.95, 0), color="#687A9E", stroke_width=3)
+        note = Text("NOT TO SCALE · +3.8 CM / YEAR", color="#C8C4F8", font_size=22).move_to((0, -2.75, 0))
+        self.add(title, earth, moon, ruler)
+        self.play(moon.animate.shift((2.9, 0, 0)),
+                  ruler.animate.put_start_and_end_on((-2.4, -.95, 0), (3.7, -.95, 0)), run_time=2.4)
+        self.play(FadeIn(note), run_time=.5)
+        self.wait(1.2)
+
+
+class RayleighSky(Scene):
+    def construct(self):
+        title = Text("WHY THE SKY IS BLUE", color="#D4ECFF", font_size=32).move_to((0, 3.1, 0))
+        sun = Circle(.72, color="#FFD27A", fill_opacity=1).move_to((-4.8, 0, 0))
+        molecule = Circle(.34, color="#9AD4FF", fill_color="#24537A", fill_opacity=1)
+        beam = Line((-3.9, 0, 0), (-.4, 0, 0), color="#FFF2C6", stroke_width=6)
+        red_pass = Arrow((.4, 0, 0), (4.6, 0, 0), buff=0, color="#FF8E72")
+        blue_scatter = VGroup(*(
+            Arrow((.3 * math.cos(a), .3 * math.sin(a), 0), (2.2 * math.cos(a), 2.2 * math.sin(a), 0),
+                  buff=0, color="#6EC4FF")
+            for a in (math.pi / 3, 2 * math.pi / 3, -math.pi / 3, -2 * math.pi / 3)
+        ))
+        self.add(title, sun, molecule)
+        self.play(Create(beam), run_time=.6)
+        self.play(Create(red_pass), Create(blue_scatter), run_time=1.35)
+        self.play(FadeIn(Text("SHORT BLUE WAVES SCATTER MOST", color="#79BEFF", font_size=22)
+                         .move_to((0, -2.85, 0))), run_time=.5)
+        self.wait(1.3)
+
+
 DIAGRAMS = {"rainbow-split": RainbowDrop, "venus-spin": VenusPeriods, "mercury-day": MercuryDay,
             "eclipse-red": LunarEclipse, "saturn-rings": SaturnRings,
-            "chandrasekhar-limit-hi": WhiteDwarf}
+            "chandrasekhar-limit-hi": WhiteDwarf, "moon-distance": MoonDistance, "sky-blue": RayleighSky}
 
 
 def render_diagram(topic_id, directory, fps):

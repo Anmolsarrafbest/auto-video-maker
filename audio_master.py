@@ -37,25 +37,37 @@ def midi_music(destination, theme, score, topic_id, seconds):
 
     def add_note(position, channel, note, velocity, duration):
         start = round(position * ticks)
-        events.extend(((start, channel, note, velocity),
+        vel = max(1, min(127, round(velocity)))
+        events.extend(((start, channel, note, vel),
                        (start + round(duration * ticks), channel, note, 0)))
 
     for index in range(int(seconds / beat) + 1):
-        chord = chords[(index // 4) % len(chords)]
-        notes = [(1, chord[1 + motif[index % 4]] + 12, 66, .70)]
-        if index % 4 == 0:
-            notes += [(0, note, 48, 3.8) for note in chord]
+        bar_idx = (index // 4) % len(chords)
+        chord = chords[bar_idx]
+        beat_in_bar = index % 4
+        melody_idx = (1 + motif[beat_in_bar]) % len(chord)
+        melody_note = chord[melody_idx] + 12
+        if bar_idx == len(chords) - 1 and beat_in_bar == 3:
+            melody_note = chord[min(len(chord) - 1, melody_idx + 1)] + 12
+        notes = [(1, melody_note, 68 + rng.randint(-6, 6), .65)]
+        if beat_in_bar in (1, 3) and rng.random() < .75:
+            passing = chord[(melody_idx + 1) % len(chord)] + 12
+            add_note(index + .5, 1, passing + root_shift, 50 + rng.randint(-5, 5), .38)
+        if beat_in_bar == 0:
+            notes += [(0, note, 48 + rng.randint(-4, 4), 3.8) for note in chord]
         for channel, note, velocity, duration in notes:
             add_note(index, channel, note + root_shift, velocity, duration)
         backbeat = index % 2
         drum = (37 if theme in {"felt piano", "slow instrumental swell"} else 38) if backbeat else 36
-        add_note(index, 9, drum, round((49 if backbeat else 75) * groove_gain), .16)
+        add_note(index, 9, drum, (49 if backbeat else 75) * groove_gain + rng.randint(-4, 4), .16)
+        if index % 8 == 0:
+            add_note(index, 9, 46, 34 * groove_gain, .35)
         for offset, velocity in ((0, 43), (.5, 29)):
-            add_note(index + offset, 9, 42, round((velocity + rng.randint(-5, 5)) * groove_gain), .10)
-        if index % 4 in (0, 1, 3):
-            offset = 0 if index % 4 == 0 else .5
+            add_note(index + offset, 9, 42, (velocity + rng.randint(-5, 5)) * groove_gain, .10)
+        if beat_in_bar in (0, 1, 3):
+            offset = 0 if beat_in_bar == 0 else .5
             bass = chord[0] + root_shift - (12 if chord[0] > 47 else 0)
-            add_note(index + offset, 2, bass + (7 if index % 4 == 3 else 0), 61, .42)
+            add_note(index + offset, 2, bass + (7 if beat_in_bar == 3 else 0), 62 + rng.randint(-4, 4), .42)
     previous = 0
     for position, channel, note, velocity in sorted(events):
         track.append(mido.Message("note_on", channel=channel, note=note, velocity=velocity,
@@ -121,7 +133,7 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues):
         space = "aecho=0.8:0.88:55:0.22," if music == "SoundFont MIDI" else ""
         graph += [
             f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{seconds},"
-            f"{space}volume=0.47,afade=t=in:d=0.25,afade=t=out:st={max(0, seconds - .6)}:d=0.6[bed]",
+            f"highpass=f=65,{space}volume=0.47,afade=t=in:d=0.25,afade=t=out:st={max(0, seconds - .6)}:d=0.6[bed]",
             "[bed][key]sidechaincompress=threshold=0.025:ratio=5:attack=25:release=330[duck]",
         ]
         mix.append("[duck]")
@@ -129,16 +141,17 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues):
     effect = topic.get("episode_plan", {}).get("sound", "sweep")
     cue_count = 0
     reveal, outro = cues
-    cue_plan = ((0, "whoosh", .30), (reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65),
-                (outro, "chime", .65))
-    for time, filename, duration in cue_plan:
+    cue_plan = ((0, "whoosh", .30, -21),
+                (reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65, -19),
+                (outro, "chime", .65, -16))
+    for time, filename, duration, target in cue_plan:
         path = CACHE / "sfx" / f"{filename}.wav"
         if path.is_file():
             analysis = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path), "-t", str(duration),
                                        "-af", "volumedetect", "-f", "null", "-"],
                                       capture_output=True, text=True, check=True)
             peak = re.search(r"max_volume:\s*(-?[\d.]+) dB", analysis.stderr)
-            gain = min(9, -20 - float(peak[1])) if peak else -20
+            gain = min(9, target - float(peak[1])) if peak else target
             cmd += ["-i", str(path)]
             label = f"[cue{next_input}]"
             graph.append(f"[{next_input}:a]aformat=sample_rates=48000:channel_layouts=stereo,"

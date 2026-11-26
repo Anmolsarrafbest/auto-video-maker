@@ -71,6 +71,17 @@ def prepare(args, topics):
         return
     trends = {} if args.offline else {region: shorts.fetch_trends(region) for region in ("IN", "US")}
     for topic in selected:
+        if getattr(args, "auto_visuals", False) and not args.offline:
+            import visuals
+            if ("archive" not in topic and topic["id"] not in shorts.CLIPS
+                    and visuals.selected(topic["id"]) is None):
+                providers = [name for name in ("pexels", "pixabay", "nasa")
+                             if name == "nasa" or shorts.secret(name.upper() + "_API_KEY")]
+                try:
+                    cached = visuals.cache_best(topic["id"], topic["title"], providers, False)
+                    shorts.save_json(visuals.CACHE / f"{topic['id']}.json", cached)
+                except (shorts.requests.RequestException, OSError, ValueError) as error:
+                    print(f"Auto visual skipped for {topic['id']} ({type(error).__name__}).", file=sys.stderr)
         job = shorts.OUTPUT / f"{PREFIX}{topic['id']}"
         shorts.render_job(topic, "Review queue", args.seconds, job, trends=trends)
         print(f"Awaiting review: {job.name}")
@@ -204,6 +215,8 @@ def main():
     draft.add_argument("--topic", action="append")
     draft.add_argument("--language", choices=("en", "en-IN", "hi"))
     draft.add_argument("--offline", action="store_true")
+    draft.add_argument("--auto-visuals", action="store_true",
+                       help="Auto-cache stock/NASA visuals for topics without cached media")
     sub.add_parser("refresh", help="Update older drafts and archive their previous versions").add_argument(
         "--offline", action="store_true"
     )

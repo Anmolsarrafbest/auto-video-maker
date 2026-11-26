@@ -34,10 +34,21 @@ def caption(job):
     meta = shorts.read_json(job / "metadata.json")
     description = meta["description"]
     lines = description.splitlines()
+    tags = []
     if lines and lines[-1].startswith("#"):
-        lines[-1] = " ".join(tag for tag in lines[-1].split() if tag.lower() != "#shorts")
-        lines[-1] = " ".join(lines[-1].split()[:5])
-    result = meta["title"] + "\n\n" + "\n".join(lines)
+        tags = lines.pop().split()
+    discovery = meta.get("discovery", {})
+    matched = discovery.get("trend", "")
+    trend_tag = "#" + re.sub(r"[^\w]", "", matched.title()) if matched else ""
+    candidates = [trend_tag, *discovery.get("instagram_tags", ()), *tags]
+    selected = {}
+    for tag in candidates:
+        if re.fullmatch(r"#[\w]{2,45}", tag) and tag.casefold() != "#shorts":
+            selected.setdefault(tag.casefold(), tag)
+    suffix = " ".join(list(selected.values())[:5])
+    result = meta["title"] + "\n\n" + "\n".join(lines).rstrip()
+    if suffix:
+        result += "\n\n" + suffix
     if len(result) > 2200:
         raise ValueError("Shorten the draft's description to fit the Instagram caption.")
     return result
@@ -85,6 +96,43 @@ def publish(session, config, job, record, day):
     record["media_id"] = result["id"]
     shorts.save_json(path, record)
     print(f"Instagram Reel published. Media ID {result['id']}.")
+
+
+def publish_batch(jobs):
+    if not shorts.has_token(shorts.TOKEN):
+        raise ValueError("Connect your YouTube channel first.")
+    if not CONFIG.is_file():
+        raise ValueError("Connect your Instagram Creator account first.")
+    config = shorts.read_json(CONFIG)
+    config["token"] = secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or config.get("token")
+    if not config["token"]:
+        raise ValueError("The Instagram Page token is missing.")
+    for job in jobs:
+        caption(job)
+    day = shorts.today("Asia/Kolkata")
+    occupied = sum(shorts.read_json(path).get("attempt_date") == day
+                   for path in shorts.OUTPUT.glob("*/upload.json"))
+    with shorts.requests.Session() as session:
+        session.headers["Authorization"] = f"Bearer {config['token']}"
+        profile = account(session, config["account_id"])
+        if profile["id"] != config["account_id"] or profile["username"].casefold() != config["username"].casefold():
+            raise ValueError("The Instagram token resolved to a different account.")
+        for job in jobs:
+            print(f"Publishing {job.name} on both platforms.", flush=True)
+            shorts.publish(job, "public", day, occupied + len(jobs), allow_reviewed=True)
+            path = job / "instagram.json"
+            record = shorts.read_json(path) if path.is_file() else {
+                "account_id": config["account_id"], "review": queue_publish.review_signature(job)
+            }
+            if record.get("media_id"):
+                print(f"Instagram already published. Media ID {record['media_id']}.")
+                continue
+            for _ in range(3):
+                publish(session, config, job, record, day)
+                if record.get("media_id"):
+                    break
+            else:
+                print(f"Instagram is still processing {job.name}. Resume using publish-both.")
 
 
 def main():

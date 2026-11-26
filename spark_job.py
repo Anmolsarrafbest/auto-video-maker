@@ -10,8 +10,6 @@ import sys
 import shorts
 import visuals
 
-CATEGORIES = {"Space", "Physics", "Ocean", "History"}
-EXCLUDED = re.compile(r"\b(politics|political|election|religion|religious|worship|campaign rally)\b", re.I)
 
 
 def parse_idea(raw):
@@ -30,14 +28,14 @@ def parse_idea(raw):
     request_id = field("request_id", 60)
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", request_id):
         raise ValueError("Use a lowercase, hyphenated request_id.")
-    title, category = field("title", 95), field("category", 12)
+    title, category = field("title", 95), field("category", 32)
     hook, explanation = field("hook", 150), field("explanation", 320)
     source = field("source", 400)
     seconds = value.get("duration_seconds")
     if type(seconds) is not int or not 15 <= seconds <= 25:
         raise ValueError("duration_seconds must be a whole number from 15 to 25.")
-    if category not in CATEGORIES or sum(len(line.split()) for line in (hook, explanation)) > int(seconds * 2.3):
-        raise ValueError("Use a supported science category and narration that fits the runtime.")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z &'-]{0,31}", category) or sum(len(line.split()) for line in (hook, explanation)) > int(seconds * 2.3):
+        raise ValueError("Use a short topic category and narration that fits the runtime.")
     visuals.validate_reference(source)
     shots = value.get("shots")
     if not isinstance(shots, list) or len(shots) != 3 or any(
@@ -46,7 +44,7 @@ def parse_idea(raw):
     ):
         raise ValueError("Supply three one-line shot descriptions.")
     labels = [field("opening_label", 38), field("payoff_label", 38)]
-    if EXCLUDED.search(" ".join([title, hook, explanation, *shots, *labels])):
+    if shorts.EXCLUDED_TOPICS.search(" ".join([category, title, hook, explanation, *shots, *labels])):
         raise ValueError("Political and religious material is outside the editorial scope.")
     topic = {"id": f"spark-{request_id}", "title": title, "category": category, "format": "story",
              "opening": "statement", "scene": "discovery", "color": "#91DFDA", "beats": [hook, explanation],

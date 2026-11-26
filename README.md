@@ -92,7 +92,8 @@ cached asset or a diagram without calling any visual API.
 
 ## How the Shorts pipeline works
 
-To discover a new science or science-history Short with Gemini, run
+To discover a new Short with Gemini across general history, science, arts,
+sports, and other subjects, run
 `python shorts.py generate --discover --seconds 15`. This uses the configured
 Gemini key and recent trend titles from India and the US, avoids previous
 titles, and writes a dialogue script and three-shot Flow prompt. The local
@@ -104,6 +105,21 @@ proposed source for editorial review.
 For five discovery drafts, run `python shorts.py generate --discover --count 5`.
 The app chooses five distinct lengths from 15 to 25 seconds before requesting
 the scripts and includes earlier batch titles in its duplicate check.
+Gemini acts as the scriptwriter and excludes politics and religion.
+
+To generate five new drafts and publish them publicly to the connected
+YouTube channel and Instagram Creator account in one local run:
+
+```powershell
+python shorts.py generate --discover --count 5 --publish-both
+```
+
+Leave off `--publish-both` to review drafts first. Publish or resume exact
+drafts later with `python shorts.py publish-both JOB_FOLDER [JOB_FOLDER ...]`.
+The Instagram caption uses up to five distinct hashtags, including a relevant
+matched Google trend when present and topic-specific tags. Google Trends
+matches are signals from search, and the app does not measure Instagram
+hashtag popularity.
 
 ### Spark JSON intake on GitHub
 
