@@ -144,9 +144,9 @@ def approve(job, topics):
 
 
 def publish(args):
-    if not shorts.TOKEN.is_file():
+    if not shorts.has_token(shorts.TOKEN):
         raise ValueError("Connect the YouTube channel before publishing approved drafts.")
-    if shorts.read_json(shorts.TOKEN)["channel"]["id"] != args.channel_id:
+    if shorts.read_token(shorts.TOKEN)["channel"]["id"] != args.channel_id:
         raise ValueError("The selected channel does not match the connected account.")
     date = shorts.today("Asia/Kolkata")
     pilot_uploads = shorts.read_json(PROGRESS).values() if PROGRESS.is_file() else ()

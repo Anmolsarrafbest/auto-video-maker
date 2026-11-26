@@ -1,25 +1,31 @@
 """Draw original science illustrations and encode narrated portrait video."""
 
 import math
-from array import array
 from bisect import bisect_right
 from functools import lru_cache
 from importlib.util import find_spec
 import os
 import random
 import re
+import shutil
 import subprocess
 import wave
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
 
 from hindi_captions import ass_filter
+from audio_master import master
+from local_secrets import secret
 from local_voices import windows_pcm
-from production import HINDI, INDIAN_ENGLISH, treatment
+from production import HINDI, INDIAN_ENGLISH, SCORES, treatment
 from storyboard import CLIPS, episode
 import footage
 
-WIDTH, HEIGHT, FPS = 720, 1280, 30
+WIDTH, HEIGHT = 720, 1280
+OUTPUT_SIZE = (1080, 1920)
+FPS = int(secret("SHORTS_FPS") or "30")
+if FPS not in (30, 60):
+    raise ValueError("SHORTS_FPS must be 30 or 60.")
 END_CARD = "Follow and subscribe"
 ANSWER_PAUSE = 1.5
 PALETTES = {
@@ -31,19 +37,6 @@ PALETTES = {
     "paper": ((52, 36, 32), (89, 67, 49), "#C9A880", "#49362B", 4),
 }
 
-# Each arrangement has its own chord progression, phrasing and instruments.
-SCORES = {
-    "orbital groove": (.46, ((38, 57, 60, 65, 69), (46, 57, 62, 65, 69),
-                             (41, 57, 60, 64, 69), (43, 55, 62, 65, 70)), (0, 2, 3, 1), .8, 1),
-    "ambient synth": (.72, ((45, 57, 60, 64, 71), (41, 53, 60, 64, 67),
-                           (48, 60, 64, 67, 74), (43, 55, 62, 69, 71)), (0, 2, 1, 3), .35, .75),
-    "felt piano": (.81, ((48, 60, 64, 67, 71), (45, 57, 60, 64, 69),
-                        (50, 62, 65, 69, 72), (43, 55, 59, 65, 69)), (3, 1, 2, 0), .08, 1.30),
-    "syncopated marimba": (.52, ((50, 62, 65, 69, 72), (43, 55, 59, 62, 67),
-                                 (48, 60, 64, 67, 72), (45, 57, 61, 64, 69)), (1, 3, 0, 2), 1, 1.10),
-    "slow instrumental swell": (.91, ((40, 52, 55, 59, 66), (47, 59, 62, 66, 69),
-                                     (45, 57, 60, 64, 71), (43, 55, 59, 62, 67)), (0, 1, 3, 2), .18, .45),
-}
 DELIVERY = {
     "documentary": (1.05, .50, .36),
     "precise": (.94, .42, .23),
@@ -108,6 +101,59 @@ def wrap(text, face, width):
 
 def circle(draw, x, y, radius, fill=None, outline=None, width=1):
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill, outline, width)
+
+
+def ease_cubic(value):
+    value = max(0, min(1, value))
+    return 4 * value ** 3 if value < .5 else 1 - (-2 * value + 2) ** 3 / 2
+
+
+class SupersampledShapes:
+    """Scale the existing illustration coordinates onto an antialiased art plane."""
+
+    scale = 3
+    top = 280
+
+    def __init__(self, color):
+        self.image = Image.new("RGB", (WIDTH * self.scale, 520 * self.scale), color)
+        self.draw = ImageDraw.Draw(self.image)
+
+    def points(self, coords):
+        if isinstance(coords[0], (tuple, list)):
+            return [tuple(self.points(point)) for point in coords]
+        return tuple(round((value - (self.top if i % 2 else 0)) * self.scale)
+                     for i, value in enumerate(coords))
+
+    def ellipse(self, box, fill=None, outline=None, width=1):
+        self.draw.ellipse(self.points(box), fill, outline, width * self.scale)
+
+    def arc(self, box, start, end, *, fill, width=1):
+        self.draw.arc(self.points(box), start, end, fill, width * self.scale)
+
+    def polygon(self, points, *, fill):
+        self.draw.polygon(self.points(points), fill)
+
+    def line(self, points, *, fill, width=1):
+        self.draw.line(self.points(points), fill, width * self.scale, joint="curve")
+
+
+def camera_shot(image, size, time, duration, zoom=.12):
+    motion = ease_cubic(time / max(.1, duration))
+    aspect = size[0] / size[1]
+    width = min(image.width, image.height * aspect) / (1 + zoom * motion)
+    height = width / aspect
+    x = (image.width - width) * (.35 + .3 * motion)
+    y = (image.height - height) * .42
+    return image.transform(size, Image.Transform.EXTENT, (x, y, x + width, y + height),
+                           Image.Resampling.BICUBIC)
+
+
+@lru_cache(maxsize=4)
+def visual_shade(size):
+    mask = Image.new("L", (1, size[1]))
+    mask.putdata([round(72 * max(0, (row / max(1, size[1] - 1) - .55) / .45) ** 2)
+                  for row in range(size[1])])
+    return mask.resize(size)
 
 
 @lru_cache(maxsize=72)
@@ -269,7 +315,7 @@ def illustration(draw, scene, accent, time, beat):
             else:
                 draw.arc((x - 89, y - 38 + offset, x + 89, y + 38 + offset), 10, 170, fill="#E5B48B", width=4)
     elif scene == "sunset":
-        sun_y = y - 69 + min(time * 7, 80)
+        sun_y = y - 69 + 80 * ease_cubic(time / 11)
         for layer in range(10, 0, -1):
             tone = (40 + (10 - layer) * 6, 54 + (10 - layer) * 8, 83 + (10 - layer) * 12)
             circle(draw, x, sun_y, 30 + layer * 9, tone)
@@ -287,7 +333,7 @@ def illustration(draw, scene, accent, time, beat):
                       fill=color, width=3)
 
 
-def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=()):
+def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(), visual_label=None):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
     base, tint, border, caption_fill, radius = PALETTES[theme]
@@ -329,40 +375,37 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
     photograph = None
     if archive_path:
         with Image.open(archive_path) as source:
-            photograph = ImageOps.contain(source.convert("RGB"), (535, 342))
+            photograph = ImageOps.contain(source.convert("RGB"), (1080, 1080), Image.Resampling.LANCZOS)
     layout = episode(topic)[1]
     starts = [start for start, _ in timings]
-    captions = []
-    for role, text, _ in plan:
-        face = font(39, True)
-        if wrap(text, face, 526).count("\n") > 3:
-            face = font(34, True)
-        captions.append((wrap(text, face, 526) if role != "hook" else "", face))
+    takeaway_font = font(35, True)
     label_font = font(23, True)
     reveal, outro = motion_cues(topic, beats, timings, seconds)
     recap_start = timings[-1][1] + .15
     recap_steps = ("Light bends as it enters", "It reflects once inside",
                    "The colors exit at different angles")
     motion = topic.get("episode_plan", {}).get("motion", "underline")
+    archive_duration = seconds * topic.get("archive_fraction", .73)
+    canvas = background.resize(OUTPUT_SIZE, Image.Resampling.BICUBIC)
+    coordinate_scale = OUTPUT_SIZE[0] / WIDTH
+
+    def native_size(width, height):
+        return round(width * coordinate_scale), round(height * coordinate_scale)
+
     for index in range(seconds * FPS):
         time = index / FPS
         recap = time >= recap_start
-        replay = bool(diagram) and outro - recap_start >= 2.4 and recap
+        replay = topic["id"] == "rainbow-split" and bool(diagram) and outro - recap_start >= 2.4 and recap
         replay_progress = min(1, max(0, (time - recap_start) / max(.1, outro - recap_start)))
         part = max(0, bisect_right(starts, time) - 1)
         beat = int(plan[part][0] == "answer")
-        img = background.copy()
-        draw = ImageDraw.Draw(img)
-        archive_shot = time < seconds * topic.get("archive_fraction", .73)
-        if clip and archive_shot:
-            archive_duration = seconds * topic.get("archive_fraction", .73)
-            # Spread sparse camera observations across the shot in chronological order.
-            frame = int(time * len(clip) / archive_duration) if topic["id"] in {"mars-sunset", "jupiter-spin"} else index
-            img.paste(clip[min(len(clip) - 1, frame)], (60, 370))
-            draw.text((348, 714), CLIPS[topic["id"]]["label"], font=font(20, True), fill=accent, anchor="mm")
-        elif photograph is not None and archive_shot:
-            img.paste(photograph, ((696 - photograph.width) // 2, 341 + (342 - photograph.height) // 2))
-            draw.text((348, 714), topic["archive"]["label"], font=font(20, True), fill=accent, anchor="mm")
+        img = canvas.copy()
+        overlay = Image.new("RGBA", (WIDTH, HEIGHT))
+        draw = ImageDraw.Draw(overlay)
+        archive_shot = (bool(clip) or photograph is not None) and time < archive_duration
+        opacity = ease_cubic((archive_duration - time) / .65) if archive_shot else 0
+        if opacity == 1:
+            pass
         elif diagram and beat:
             diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
             if replay:
@@ -370,38 +413,51 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             shot = diagram[diagram_frame]
             drift = min(1, max(0, (time - reveal) / max(1, seconds - reveal)))
             width = WIDTH + round(32 * drift)
-            shot = shot.resize((width, round(456 * width / WIDTH)), Image.Resampling.BILINEAR)
-            img.paste(shot, ((WIDTH - width) // 2, 300 - (shot.height - 456) // 2))
+            height = round(456 * width / WIDTH)
+            shot = shot.resize(native_size(width, height), Image.Resampling.BICUBIC)
+            img.paste(shot, native_size((WIDTH - width) / 2, 300 - (height - 456) / 2))
         else:
             if layout in {"space film", "experiment"}:
-                stage = Image.new("RGB", (WIDTH, HEIGHT), base)
-                illustration(ImageDraw.Draw(stage), topic["scene"], accent, time, beat)
+                stage = SupersampledShapes(base)
+                illustration(stage, topic["scene"], accent, time, beat)
                 if topic["scene"] == "distance":
                     moon = lunar_sphere(time * 4)
                     offset = 30 * (1 - math.cos(time * .4))
-                    stage.paste(moon, (round(477 + offset) - 42, 500), moon)
+                    moon = moon.resize((252, 252), Image.Resampling.LANCZOS)
+                    stage.image.paste(moon, stage.points((477 + offset - 42, 500)), moon)
                 push_start = min(recap_start, seconds - 3)
                 progress = min(1, max(0, (time - push_start) / max(1.2, outro - push_start)))
-                ease = progress * progress * (3 - 2 * progress)
+                ease = ease_cubic(progress)
                 wide = (62, 364 if beat else 315, 645, 715 if beat else 750)
-                bounds = tuple(round(a + (b - a) * ease) for a, b in zip(wide, (96, 384, 625, 689)))
-                shot = stage.crop(bounds)
-                shot = ImageOps.fit(shot, (720, 490))
-                img.paste(shot, (0, 313 if layout == "space film" else 330))
+                bounds = tuple(a + (b - a) * ease for a, b in zip(wide, (96, 384, 625, 689)))
+                shot = ImageOps.fit(stage.image.crop(stage.points(bounds)),
+                                    native_size(WIDTH, 490), Image.Resampling.LANCZOS)
+                img.paste(shot, native_size(0, 313 if layout == "space film" else 330))
             else:
-                stage = Image.new("RGB", (WIDTH, HEIGHT), base)
-                illustration(ImageDraw.Draw(stage), topic["scene"], accent, time, beat)
-                shot = ImageOps.fit(stage.crop((54, 319, 646, 752)), (WIDTH, 490))
-                img.paste(shot, (0, 306))
+                stage = SupersampledShapes(base)
+                illustration(stage, topic["scene"], accent, time, beat)
+                shot = ImageOps.fit(stage.image.crop(stage.points((54, 319, 646, 752))),
+                                    native_size(WIDTH, 490), Image.Resampling.LANCZOS)
+                img.paste(shot, native_size(0, 306))
+        if archive_shot:
+            frame = min(len(clip) - 1, int(time * len(clip) / archive_duration)) if clip else 0
+            source = clip[frame] if clip else photograph
+            label = visual_label or (CLIPS[topic["id"]]["label"] if clip else topic["archive"]["label"])
+            shot = camera_shot(source, native_size(WIDTH, 405), time, archive_duration, zoom=.08)
+            shot.paste(base, (0, 0, *shot.size), visual_shade(shot.size))
+            archive_canvas = canvas.copy()
+            archive_canvas.paste(shot, native_size(0, 310))
+            img = archive_canvas if opacity == 1 else Image.blend(img, archive_canvas, opacity)
+            if opacity > .5:
+                draw.text((348, 748), label, font=font(20, True), fill=accent, anchor="mm")
         if beat and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 550 else font(20, True),
                       fill=accent, anchor="mm")
             if topic["scene"] == "distance":
                 draw.text((348, 755), "ILLUSTRATION · NOT TO SCALE", font=font(17, True), fill=accent, anchor="mm")
-        caption, face = captions[part]
+        caption, face = "", takeaway_font
         if recap:
-            face = font(35, True)
             takeaway = topic["labels"][1]
             if replay:
                 step = bisect_right((1.4, 2.2), diagram_frame / FPS)
@@ -437,85 +493,9 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             y = 1090 + round(18 * (1 - progress) ** 3)
             draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
             draw.text((360, y + 30), END_CARD, font=font(27, True), fill="#F7F3EA", anchor="mm")
+        overlay = overlay.resize(OUTPUT_SIZE, Image.Resampling.BILINEAR)
+        img.paste(overlay, (0, 0), overlay)
         yield img
-
-
-def mix_music(audio, rate, timings, topic, cues):
-    """Compose an original background score around the episode's delivery."""
-    samples = array("h")
-    samples.frombytes(audio)
-    score = treatment(topic)["soundtrack"]
-    beat_length, progression, motif, percussion, lead = SCORES[score]
-    random_noise = random.Random(topic.get("id", score))
-    key = random_noise.choice((-2, -1, 0, 2, 3))
-    inversion = random_noise.randrange(len(motif))
-    motif = motif[inversion:] + motif[:inversion]
-    beat_length *= random_noise.uniform(.91, 1.09)
-    bar_length = beat_length * 4
-    chords = [tuple(440 * 2 ** ((note + key - 69) / 12) for note in chord) for chord in progression]
-    sound = topic.get("episode_plan", {}).get("sound", "sweep")
-    pitch, glide, decay = {"pop": (155, 80, 25), "sweep": (220, 180, 14),
-                           "chime": (520, 35, 10)}[sound]
-    effects_plan = ((cues[0], pitch, glide, decay, 1350), (cues[1], 420, 180, 14, 1000))
-    for index, speech in enumerate(samples):
-        time = index / rate
-        bar = time % bar_length
-        root, *tones = chords[int(time / bar_length) % len(chords)]
-        chord_fade = min(1, bar * 10, (bar_length - bar) * 10)
-        pad = 1100 * chord_fade * sum(
-            math.sin(math.tau * note * time) + .2 * math.sin(math.tau * note * 2.003 * time)
-            for note in tones
-        ) / len(tones)
-        pulse = bar % beat_length
-        bass = 1600 * min(1, pulse * 75) * math.exp(-pulse * 3) * math.sin(math.tau * root * pulse)
-        kick = 900 * math.exp(-pulse * 25) * math.sin(math.tau * (45 * pulse + .7 * (1 - math.exp(-35 * pulse))))
-        brush = 590 * random_noise.uniform(-1, 1) * math.exp(-(bar % (beat_length / 2)) * 40)
-        melody_time = pulse
-        note = tones[motif[min(3, int(bar / beat_length))]] * 2
-        angle = math.tau * note * melody_time
-        color = math.sin(angle)
-        if score == "syncopated marimba":
-            melody_time = (bar + beat_length / 3) % beat_length
-            angle = math.tau * note * melody_time
-            color = math.sin(angle) + .28 * math.sin(3.97 * angle)
-        elif score == "felt piano":
-            color += .18 * math.sin(2 * angle) + .09 * math.sin(3.01 * angle)
-        elif score == "slow instrumental swell":
-            color *= .5 + .5 * math.sin(bar * math.tau / bar_length - math.pi / 2)
-        keys = 640 * lead * min(1, melody_time * 60) * math.exp(-melody_time * 6) * color
-        distance = min(max(start - time, time - end, 0) for start, end in timings)
-        duck = .53 + .47 * min(1, distance / .14)
-        fade = min(1, (time + .03) * 8, (len(samples) - index) / (.38 * rate))
-        if score == "felt piano":
-            hammer = math.sin(angle) + .22 * math.sin(2.01 * angle) + .10 * math.sin(4.03 * angle)
-            arpeggio = tones[(int(bar * 2 / beat_length) + inversion) % len(tones)]
-            piano = 1450 * hammer * min(1, pulse * 110) * math.exp(-pulse * 4.6)
-            resonance = 460 * math.sin(math.tau * arpeggio * time) * chord_fade
-            music = piano + resonance + .24 * pad
-        elif score == "ambient synth":
-            swell = .55 + .45 * math.sin(math.tau * (bar / bar_length - .25))
-            drone = 1200 * math.sin(math.tau * root * time) * chord_fade
-            music = pad * swell + drone + .3 * keys
-        elif score == "slow instrumental swell":
-            wash = .48 + .52 * math.sin(time * .8) ** 2
-            music = pad * wash + .48 * bass + .25 * brush + .8 * keys
-        else:
-            music = .30 * pad + bass + percussion * (kick + brush) + 1.2 * keys
-        if score == "orbital groove":
-            offbeat = (bar + beat_length / 2) % beat_length
-            pluck = math.sin(math.tau * note * offbeat) * math.exp(-offbeat * 8)
-            music += 650 * pluck * min(1, offbeat * 100) + .35 * pad
-        effects = 0
-        for onset, pitch, glide, decay, gain in effects_plan:
-            elapsed = time - onset
-            if 0 <= elapsed < .32:
-                sweep = pitch * elapsed + glide * elapsed ** 2
-                effects += gain * min(1, elapsed * 180) * math.exp(-elapsed * decay) * (
-                    math.sin(math.tau * sweep) + .24 * math.sin(math.tau * sweep * 2)
-                )
-        mixed = round(speech * .76 + fade * (1.55 * duck * music + effects))
-        samples[index] = max(-32768, min(32767, mixed))
-    return samples.tobytes()
 
 
 def narration(beats, seconds, voice_path, destination, *, topic=None):
@@ -530,7 +510,7 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
 
             if not voice_path.is_file():
                 raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
-            voice = PiperVoice.load(voice_path)
+            voice = PiperVoice.load(voice_path, use_cuda=False)
 
         def synthesize(index, role, line, pace):
             length = pace * speed * (1.06 if role == "pause" else 1)
@@ -572,38 +552,50 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
         timings.append((start / rate, end / rate))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        wav.writeframes(mix_music(audio, rate, timings, topic, motion_cues(topic, beats, timings, seconds)))
+        wav.writeframes(audio)
     return timings
 
 
-def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *, archive_path=None, use_clip=False):
+def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *,
+           archive_path=None, use_clip=False, visual=None):
     import imageio_ffmpeg
 
+    if (secret("USE_LOCAL_GPU") or "false").strip().lower() not in {"false", "0", "no"}:
+        raise ValueError("This renderer is CPU-only. Set USE_LOCAL_GPU=false.")
     ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
     clip = footage.decode(ffmpeg, topic["id"], FPS) if use_clip else ()
+    if visual:
+        if visual["kind"] == "video":
+            clip = footage.decode_frames(ffmpeg, visual["path"], FPS)
+            if not clip:
+                raise ValueError("The selected stock clip could not be decoded.")
+        else:
+            archive_path = visual["path"]
     if use_clip and not clip:
         raise ValueError("The reviewed footage did not decode. Check the cached file.")
     diagram = ()
-    if topic["id"] == "rainbow-split" and find_spec("manim") is not None:
-        from manim_diagrams import render_rainbow
+    if topic["id"] in {"rainbow-split", "venus-spin"} and find_spec("manim") is not None:
+        from manim_diagrams import render_diagram
 
-        diagram = footage.decode_frames(ffmpeg, render_rainbow(wav_path.parent, FPS), FPS)
+        diagram = footage.decode_frames(ffmpeg, render_diagram(topic["id"], wav_path.parent, FPS), FPS)
         if not diagram:
             raise ValueError("The Manim diagram did not decode.")
+    caption_filter, caption_timing = ass_filter(
+        wav_path.parent, topic, spoken_plan(topic, beats), timings, seconds, wav_path)
+    shutil.copyfile(wav_path.parent / "captions.ass", destination.with_name("captions.ass"))
+    theme = treatment(topic)["soundtrack"]
+    mastered, audio = master(ffmpeg, wav_path, seconds, topic, theme, SCORES[theme],
+                             motion_cues(topic, beats, timings, seconds))
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{WIDTH}x{HEIGHT}",
-           "-framerate", str(FPS), "-i", "-", "-i", str(wav_path), "-map", "0:v", "-map", "1:a"]
-    hindi = topic.get("language") == "hi"
-    if hindi:
-        cmd.extend(["-vf", ass_filter(wav_path.parent, topic, spoken_plan(topic, beats), timings, seconds)])
-    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-t", str(seconds), str(destination)]
-    )
+           "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}",
+           "-framerate", str(FPS), "-i", "-", "-i", str(mastered), "-map", "0:v", "-map", "1:a",
+           "-vf", caption_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+           "-pix_fmt", "yuv420p", "-threads:v", "4", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+           "-movflags", "+faststart", "-t", str(seconds), str(destination)]
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, cwd=wav_path.parent) as process:
         try:
-            for index, image in enumerate(frames(topic, beats, timings, seconds, archive_path, clip, diagram)):
-                if poster and index == FPS and not hindi:
-                    image.save(poster)
+            label = visual["credit"][:65] if visual else None
+            for image in frames(topic, beats, timings, seconds, archive_path, clip, diagram, label):
                 process.stdin.write(image.tobytes())
         except BrokenPipeError:
             pass
@@ -611,7 +603,8 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
             process.stdin.close()
         if process.wait():
             raise ValueError("FFmpeg could not encode the Short.")
-    if poster and hindi:
+    if poster:
         subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "1",
                         "-i", str(destination), "-frames:v", "1", str(poster)], check=True)
-    return "manim" if diagram else "pillow"
+    return {"diagram_renderer": "manim" if diagram else "pillow", "caption_timing": caption_timing,
+            "resolution": list(OUTPUT_SIZE), "fps": FPS, "audio": audio}

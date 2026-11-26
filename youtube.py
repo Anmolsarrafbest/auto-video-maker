@@ -27,6 +27,19 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+def read_token(path):
+    from local_secrets import secret
+
+    value = secret("YOUTUBE_TOKEN_JSON")
+    return json.loads(value) if value else read_json(path)
+
+
+def has_token(path):
+    from local_secrets import secret
+
+    return bool(secret("YOUTUBE_TOKEN_JSON")) or path.is_file()
+
+
 def channel(session):
     response = session.get(f"{API}/channels", params={"mine": "true", "part": "snippet"}, timeout=20)
     require(response, (200,), "read the channel")
@@ -41,7 +54,12 @@ def sign_in(client_path, token_path):
     credentials = flow.run_local_server(port=0, prompt="consent", timeout_seconds=180)
     with AuthorizedSession(credentials) as session:
         selected = channel(session)
-    save_json(token_path, {"channel": selected, "credentials": json.loads(credentials.to_json())})
+    from local_secrets import store_secret
+
+    store_secret("YOUTUBE_TOKEN_JSON", json.dumps(
+        {"channel": selected, "credentials": json.loads(credentials.to_json())}
+    ))
+    token_path.unlink(missing_ok=True)
     return selected
 
 
@@ -61,7 +79,7 @@ def upload(job, token_path, visibility, execution_date, *, publish_at=None):
     if record.get("video_id"):
         return record["video_id"]
 
-    token = read_json(token_path)
+    token = read_token(token_path)
     credentials = Credentials.from_authorized_user_info(token["credentials"], scopes=SCOPES)
     media = (job / "short.mp4").read_bytes()
     digest = hashlib.sha256(media).hexdigest()

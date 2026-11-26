@@ -54,8 +54,8 @@ def open_youtube():
         session = shorts.requests.Session()
         session.params["key"] = key
         return session
-    if shorts.TOKEN.is_file():
-        token = shorts.read_json(shorts.TOKEN)
+    if shorts.has_token(shorts.TOKEN):
+        token = shorts.read_token(shorts.TOKEN)
         return AuthorizedSession(Credentials.from_authorized_user_info(token["credentials"]))
     raise ValueError("Set YOUTUBE_API_KEY locally or connect the YouTube channel first.")
 

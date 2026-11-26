@@ -34,7 +34,7 @@ def fetch(topic):
         if original.width * original.height > 30_000_000:
             raise ValueError(f"Archival image is too large to decode: {topic['id']}")
         image = ImageOps.exif_transpose(original).convert("RGB")
-        image.thumbnail((1400, 1400))
+        image.thumbnail((1920, 1920))
         image.save(temporary, format="JPEG", quality=92)
     temporary.replace(path)
     return path

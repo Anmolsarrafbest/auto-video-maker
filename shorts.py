@@ -22,10 +22,12 @@ from google.auth.exceptions import RefreshError
 
 import archives
 import footage
+import visuals
 from production import ATTRIBUTION, VOICE_CREDITS, VOICE_SNAPSHOT, treatment, voice_credit
 from render import encode, narration, spoken_plan
 from storyboard import CLIPS, DURATIONS, episode, flow_prompt
-from youtube import read_json, save_json, sign_in, upload
+from local_secrets import secret
+from youtube import has_token, read_json, read_token, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
 STATE = ROOT / "state"
@@ -116,7 +118,7 @@ def choose(topics, used, regional_trends):
 
 def draft_beats(topic, seconds):
     """Opt-in API call on a free, unbilled Gemini project for manually reviewed drafts."""
-    key = os.environ.get("GEMINI_FREE_API_KEY")
+    key = secret("GEMINI_FREE_API_KEY").strip()
     if not key:
         print("GEMINI_FREE_API_KEY is unset. Using the sourced narration.", file=sys.stderr)
         return topic["beats"]
@@ -192,7 +194,7 @@ def plan_shots(provider, brief):
         response.raise_for_status()
         raw = response.json()["response"]
     else:
-        key = os.getenv("GEMINI_FREE_API_KEY", "").strip()
+        key = secret("GEMINI_FREE_API_KEY").strip()
         if not key:
             raise ValueError("Missing free-tier key")
         response = requests.post(
@@ -209,7 +211,7 @@ def plan_shots(provider, brief):
 
 
 def gemini_episode(topic, seconds, assets):
-    key = os.getenv("GEMINI_FREE_API_KEY", "").strip()
+    key = secret("GEMINI_FREE_API_KEY").strip()
     if not key:
         raise ValueError("GEMINI_FREE_API_KEY is empty in this PowerShell session")
     fields = {
@@ -276,7 +278,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         except (ValueError, KeyError, TypeError, IndexError, requests.RequestException) as error:
             response = getattr(error, "response", None)
             reason = f"HTTP {response.status_code}" if response is not None else type(error).__name__
-            if not os.getenv("GEMINI_FREE_API_KEY", "").strip():
+            if not secret("GEMINI_FREE_API_KEY").strip():
                 reason = "GEMINI_FREE_API_KEY is empty"
             print(f"Gemini episode plan unavailable ({reason}). Using the built-in plan.", file=sys.stderr)
     elif use_gemini and topic.get("language") != "hi":
@@ -289,6 +291,9 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         archive_path = archives.cache_file(topic)
     elif "archive" in topic:
         print(f"Archival photo unavailable for {topic['id']}. Using its original diagram.", file=sys.stderr)
+    visual = visuals.selected(topic["id"]) if archive_path is None and "clip_source" not in direction else None
+    if visual:
+        direction["visual_source"] = visual["source"]
 
     def write_audio(script):
         return narration(script, seconds, VOICE_DIR / f'{direction["voice"]}.onnx', wav, topic=topic)
@@ -330,7 +335,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
                     reason = f"HTTP {response.status_code}"
                 elif isinstance(error, requests.RequestException):
                     reason = type(error).__name__
-                elif planner == "gemini" and not os.getenv("GEMINI_FREE_API_KEY", "").strip():
+                elif planner == "gemini" and not secret("GEMINI_FREE_API_KEY").strip():
                     reason = "GEMINI_FREE_API_KEY is empty in this PowerShell session"
                 else:
                     reason = "the model returned an invalid or incomplete shot plan"
@@ -338,10 +343,10 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
                       file=sys.stderr)
         if archive_path or "clip_source" in direction:
             brief += f'Use the credited archive until {seconds * topic.get("archive_fraction", .73):.2f}s, then cut to the explanation.\n'
-        direction["diagram_renderer"] = encode(
+        direction.update(encode(
             topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png",
-            archive_path=archive_path, use_clip="clip_source" in direction,
-        )
+            archive_path=archive_path, use_clip="clip_source" in direction, visual=visual,
+        ))
         style = topic.get("format", "quiz")
         pause = next(gap for role, _, gap in spoken_plan(topic, beats) if role == "answer")
         metadata = youtube_metadata(topic, trends, archive_used=archive_path is not None)
@@ -349,6 +354,9 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             body, separator, tags = metadata["description"].rpartition("\n\n")
             clip = CLIPS[topic["id"]]
             metadata["description"] = f'{body}\n\n{clip["credit"]} {clip["source"]}{separator}{tags}'
+        if visual:
+            body, separator, tags = metadata["description"].rpartition("\n\n")
+            metadata["description"] = f'{body}\n\nVisual: {visual["credit"]} {visual["source"]}{separator}{tags}'
         save_json(scratch / "metadata.json", {
             "topic_id": topic["id"], "selection": provenance, "duration_seconds": seconds,
             **metadata,
@@ -357,7 +365,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             "production": direction,
             "archive": topic.get("archive") if archive_path is not None else None,
             "answer_pause_seconds": pause, "needs_review": bool(episode_plan) or beats != topic["beats"],
-            "made_for_kids": False, "synthetic_media": False,
+            "made_for_kids": False, "synthetic_media": bool(visual and visual["synthetic"]),
         })
         (scratch / "flow-prompt.txt").write_text(
             brief,
@@ -393,7 +401,7 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
         raise ValueError("Re-record and render this Hindi draft before publishing it.")
     if meta["needs_review"] and not allow_reviewed:
         raise ValueError("Review the Gemini draft, then use upload --reviewed to confirm it.")
-    if not TOKEN.exists():
+    if not has_token(TOKEN):
         raise ValueError("YouTube is disconnected. Follow the OAuth setup in README.md, then run "
                          "python shorts.py connect-youtube --client \"PATH_TO_DOWNLOADED_JSON\".")
     occupied = sum(read_json(path)["attempt_date"] == date
@@ -425,6 +433,7 @@ def cli():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup-voice", help="Download the free Piper voice set")
+    sub.add_parser("setup-captions", help="Download the free CPU Whisper tiny model for offline use")
     assets = sub.add_parser("setup-assets", help="Download the verified history images")
     assets.add_argument("--topic", action="append", help="Only fetch the selected archival topic")
     clip_setup = sub.add_parser("setup-footage", help="Download reviewed NASA footage")
@@ -457,6 +466,14 @@ def cli():
 
 
 def run(args):
+    if args.command == "setup-captions":
+        from huggingface_hub import snapshot_download
+        from hindi_captions import MODEL_DIR
+
+        snapshot_download("Systran/faster-whisper-tiny", local_dir=MODEL_DIR,
+                          allow_patterns=["*.json", "model.bin", "vocabulary.txt"])
+        print("Whisper tiny cached for offline captions.")
+        return
     if args.command == "setup-voice":
         setup_voice()
         return
@@ -532,8 +549,8 @@ def run(args):
         render_job(topic, reason, args.seconds, job, args.gemini, trends=current_trends(), planner=args.shot_planner)
         return
 
-    if args.upload and (not TOKEN.exists() or not args.channel_id or
-                        args.channel_id != read_json(TOKEN)["channel"]["id"]):
+    if args.upload and (not has_token(TOKEN) or not args.channel_id or
+                        args.channel_id != read_token(TOKEN)["channel"]["id"]):
         raise ValueError("To schedule uploads, connect YouTube and pass its exact --channel-id.")
     date = today(args.timezone)
     for slot in range(1, args.count + 1):

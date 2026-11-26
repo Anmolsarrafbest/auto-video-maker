@@ -36,14 +36,20 @@ def decode(ffmpeg, topic_id, fps):
 
 
 def decode_frames(ffmpeg, path, fps):
-    width, height = 576, 324
-    data = subprocess.run(
+    width, height = 1080, 608
+    stride = width * height * 3
+    frames = []
+    with subprocess.Popen(
         [ffmpeg, "-v", "error", "-i", str(path), "-t", "4",
          "-vf", f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
          "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-        capture_output=True, check=True,
-    ).stdout
-    stride = width * height * 3
-    return [Image.frombytes("RGB", (width, height), data[i:i + stride])
-            for i in range(0, len(data) - stride + 1, stride)]
+        stdout=subprocess.PIPE,
+    ) as process:
+        while data := process.stdout.read(stride):
+            if len(data) != stride:
+                break
+            frames.append(Image.frombytes("RGB", (width, height), data))
+        if process.wait():
+            raise ValueError(f"Could not decode visual media: {Path(path).name}")
+    return frames

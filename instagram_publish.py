@@ -8,6 +8,7 @@ import time
 
 import queue_publish
 import shorts
+from local_secrets import secret, store_secret
 
 CONFIG = shorts.ROOT / "secrets" / "instagram.json"
 GRAPH = "https://graph.facebook.com/v27.0"
@@ -116,7 +117,8 @@ def main():
                 if (profile["id"] != args.account_id or
                         profile["username"].lower() != args.username.removeprefix("@").lower()):
                     raise ValueError("The access token resolved to a different Instagram profile.")
-                shorts.save_json(CONFIG, {"account_id": profile["id"], "username": profile["username"], "token": token})
+                store_secret("INSTAGRAM_PAGE_ACCESS_TOKEN", token)
+                shorts.save_json(CONFIG, {"account_id": profile["id"], "username": profile["username"]})
                 print(f"Connected @{profile['username']}.")
                 return
             if not CONFIG.is_file():
@@ -144,6 +146,9 @@ def main():
             if job is None:
                 print("There are no approved Reels waiting for Instagram.")
                 return
+            config["token"] = secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or config.get("token")
+            if not config["token"]:
+                raise ValueError("Instagram Page token is missing. Run connect again.")
             session.headers["Authorization"] = f"Bearer {config['token']}"
             profile = account(session, config["account_id"])
             if profile["id"] != config["account_id"] or profile["username"].lower() != config["username"].lower():

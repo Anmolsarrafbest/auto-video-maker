@@ -35,6 +35,21 @@ TREATMENTS = {
     "copper": (VOICE, "precise", "orbital groove"),
     "paper": (ALBA, "documentary", "felt piano"),
 }
+
+# Each arrangement has its own chord progression, phrasing and instruments.
+SCORES = {
+    "orbital groove": (.46, ((38, 57, 60, 65, 69), (46, 57, 62, 65, 69),
+                             (41, 57, 60, 64, 69), (43, 55, 62, 65, 70)), (0, 2, 3, 1), .8, 1),
+    "ambient synth": (.72, ((45, 57, 60, 64, 71), (41, 53, 60, 64, 67),
+                           (48, 60, 64, 67, 74), (43, 55, 62, 69, 71)), (0, 2, 1, 3), .35, .75),
+    "felt piano": (.81, ((48, 60, 64, 67, 71), (45, 57, 60, 64, 69),
+                        (50, 62, 65, 69, 72), (43, 55, 59, 65, 69)), (3, 1, 2, 0), .08, 1.30),
+    "syncopated marimba": (.52, ((50, 62, 65, 69, 72), (43, 55, 59, 62, 67),
+                                 (48, 60, 64, 67, 72), (45, 57, 61, 64, 69)), (1, 3, 0, 2), 1, 1.10),
+    "slow instrumental swell": (.91, ((40, 52, 55, 59, 66), (47, 59, 62, 66, 69),
+                                     (45, 57, 60, 64, 71), (43, 55, 59, 62, 67)), (0, 1, 3, 2), .18, .45),
+}
+
 TOPIC_THEMES = {"jupiter-spin": "copper", "katherine-johnson": "paper"}
 TOPIC_VOICES = {
     "wright-first-flight": JOE,

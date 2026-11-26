@@ -1,5 +1,71 @@
 # Auto Video Maker
 
+## CPU video, captions, and audio setup
+
+The renderer exports 1080×1920 H.264 with stereo AAC (192 kbps target). Set these
+in the ignored project `.env`:
+
+```dotenv
+USE_LOCAL_GPU=false
+SHORTS_FPS=30
+```
+
+Use `SHORTS_FPS=60` for smoother motion if the CPU has enough time to render.
+The GPU flag is reserved for a future backend. All current rendering, narration,
+and transcription run on CPU. Install the Python dependencies and cache the
+multilingual Whisper tiny model once:
+
+```powershell
+python -m pip install -r requirements.txt
+python shorts.py setup-voice
+python shorts.py setup-captions
+python shorts.py generate --topic venus-spin --seconds 12 --offline
+```
+
+`setup-captions` makes the initial download. Subsequent renders use the local
+model in CPU INT8 mode and retain the verified script text. When the model is
+unavailable, captions use estimated word timings from the narration. FFmpeg
+burns in the captions via libass. Each draft also includes its editable
+`captions.ass` file. A custom `SHORTS_FFMPEG` binary must include libass and
+libx264.
+
+### Local music and sound effects
+
+- Put CC0 or royalty-free MP3/WAV tracks you have permission to publish in
+  `assets-cache/music/<soundtrack>/`, using the soundtrack names in
+  `production.py` such as `ambient synth` and `felt piano`. Keep license and
+  attribution records for the tracks you use.
+- If the music cache is empty, the renderer generates a MIDI arrangement and
+  plays it through FluidSynth and `assets-cache/soundfont.sf2`. The
+  [GeneralUser GS SoundFont](https://github.com/mrbumpy409/GeneralUser-GS) is a
+  free option. Install [FluidSynth](https://github.com/FluidSynth/fluidsynth/releases)
+  on your PATH, set `FLUIDSYNTH_EXE`, or extract its Windows release into
+  `assets-cache/fluidsynth/`. PyFluidSynth can also use an installed native
+  library. If the SoundFont or runtime is unavailable, narration still renders.
+- Put CC0 `whoosh.wav`, `pop.wav`, and `chime.wav` in `assets-cache/sfx/`.
+  The [Starter Sound Kit](https://alfredmakes.com/guides/starter-sound-kit/) has
+  all three. The renderer times them to the reveal and end card. FFmpeg ducks
+  the music under the narration and normalizes the mix to a −14 LUFS target.
+
+### Optional visual sources
+
+Cached catalogue media takes priority. To use another asset, search, review
+its relevance and license, then run the same command with `--use ID`:
+
+```powershell
+python visuals.py venus-spin "Venus atmosphere" --provider nasa
+python visuals.py venus-spin "Venus atmosphere" --provider nasa --use REVIEWED_ID
+```
+
+NASA requires no key. `--provider pexels` and `--provider pixabay` use free API
+keys named `PEXELS_API_KEY` and `PIXABAY_API_KEY` in `.env`. The selected
+asset is cached with its credit and source for offline rendering.
+To try a keyless generated illustration, use `--provider pollinations --use generate`
+with a descriptive prompt. If that endpoint requires authentication or payment,
+the command exits and the existing cache stays available. Generated visuals are
+credited and flagged in upload metadata. The default offline render uses the
+cached asset or a diagram without calling any visual API.
+
 ## How the Shorts pipeline works
 
 ```mermaid
@@ -12,11 +78,12 @@ flowchart TD
     D --> F["Synthesize narration and measure speech timing"]
     E --> F
     F --> G["Piper or Windows speech plus original music and timed sound effects"]
-    F --> H["Pillow draws captions and motion graphics, and places archival media"]
-    M["Manim draws the rainbow diagram on CPU when installed"] --> H
+    F --> H["Pillow composites supersampled graphics and archival media"]
+    M["Manim draws rainbow and Venus diagrams on CPU when installed"] --> H
     G --> I["FFmpeg combines audio and visuals into a vertical MP4"]
     H --> I
-    I --> J["Local draft with preview, metadata, research prompt and Flow prompt"]
+    W["Whisper CPU INT8 aligns words and libass burns captions"] --> I
+    I --> J["Local draft with preview, captions, metadata, research prompt and Flow prompt"]
     J --> K["Review the result and approve it for queue publishing"]
     K --> L["YouTube Data API uploads or schedules the Short"]
     J -.-> N["Optional manual use of the shot prompt in Google Flow"]
@@ -74,7 +141,13 @@ python shorts.py daily --count 2 --seconds 12 --region IN
 
 Use this only if you have a separate Gemini API key from a project on the free tier with billing disabled. Your Jio Google AI Pro chat and Flow access work independently of the API.
 
-Set `GEMINI_FREE_API_KEY` in your shell, then run:
+Set `GEMINI_FREE_API_KEY` in your shell or save it in the ignored project `.env` file:
+
+```powershell
+python -c "from getpass import getpass; from local_secrets import store_secret; store_secret('GEMINI_FREE_API_KEY', getpass('Gemini API key: ').strip())"
+```
+
+Then run:
 
 ```powershell
 python shorts.py generate --topic saturn-rings --seconds 15 --gemini
@@ -173,10 +246,10 @@ python instagram_publish.py approve queue-katherine-johnson
 python instagram_publish.py publish-next
 ```
 
-Enter the Page token at the hidden prompt. The token stays in the ignored `secrets/instagram.json` file. Review the video in the local queue first, then approve it explicitly for Instagram. `publish-next` can publish one approved Reel per India calendar day. It publishes immediately when Meta finishes processing. Start with one manual test, then use Windows Task Scheduler to run `python.exe` with the absolute path to `instagram_publish.py` and argument `publish-next`. Use the project folder for **Start in**. The PC must be on and signed in. If an earlier publish has an uncertain outcome, reconcile it on the Instagram profile before changing the local receipt.
+Enter the Page token at the hidden prompt. It is saved as `INSTAGRAM_PAGE_ACCESS_TOKEN` in the ignored project `.env` file. The Instagram account ID and username are stored in `secrets/instagram.json`. YouTube OAuth sign-in saves the channel and credentials as `YOUTUBE_TOKEN_JSON` in `.env`. Review the video in the local queue first, then approve it explicitly for Instagram. `publish-next` can publish one approved Reel per India calendar day. It publishes immediately when Meta finishes processing. Start with one manual test, then use Windows Task Scheduler to run `python.exe` with the absolute path to `instagram_publish.py` and argument `publish-next`. Use the project folder for **Start in**. The PC must be on and signed in. If an earlier publish has an uncertain outcome, reconcile it on the Instagram profile before changing the local receipt.
 # Optional Manim science diagrams
 
-Install Manim Community to use a CPU-rendered animation for the rainbow Short.
+Install Manim Community to use CPU-rendered animations for the rainbow and Venus Shorts.
 The main renderer adds the diagram at the narration reveal and keeps the existing
 captions, music, sound cues, and end card.
 
@@ -185,5 +258,5 @@ python -m pip install manim==0.22.1
 python shorts.py generate --topic rainbow-split --offline
 ```
 
-The job's `metadata.json` records the diagram renderer. The rainbow uses the
-built-in illustration when Manim is absent. Other topics use their existing visuals.
+The job's `metadata.json` records the diagram renderer. These topics use their
+built-in illustrations when Manim is absent.

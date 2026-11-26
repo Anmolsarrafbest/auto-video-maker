@@ -1,6 +1,6 @@
 """CPU-rendered science inserts for the Shorts renderer."""
 
-from manim import Circle, Create, FadeIn, Line, Scene, Text, VGroup, tempconfig
+from manim import Circle, Create, FadeIn, GrowFromEdge, LEFT, Line, Rectangle, Scene, Text, UP, VGroup, tempconfig
 
 
 class RainbowDrop(Scene):
@@ -27,13 +27,32 @@ class RainbowDrop(Scene):
         self.wait(.6)
 
 
-def render_rainbow(directory, fps):
-    destination = directory / "rainbow-diagram.mp4"
+class VenusPeriods(Scene):
+    def construct(self):
+        title = Text("VENUS: SPIN VS. ORBIT", color="#FFF0D2", font_size=32).move_to((0, 2.8, 0))
+        self.add(title)
+        for days, name, color, y in ((243, "One spin", "#FFBE86", 1.2),
+                                     (225, "One orbit", "#83D7DF", -1)):
+            width = 8 * days / 243
+            bar = Rectangle(width=width, height=.55, stroke_width=0,
+                            fill_color=color, fill_opacity=1).move_to((-4.5 + width / 2, y, 0))
+            label = Text(f"{name}  ·  {days} Earth days", color=color, font_size=27).next_to(bar, UP)
+            self.play(GrowFromEdge(bar, LEFT), FadeIn(label), run_time=1.1)
+        self.play(FadeIn(Text("SIDEREAL ROTATION", color="#FFF0D2", font_size=22)
+                         .move_to((0, -2.7, 0))), run_time=.5)
+        self.wait(1.3)
+
+
+DIAGRAMS = {"rainbow-split": RainbowDrop, "venus-spin": VenusPeriods}
+
+
+def render_diagram(topic_id, directory, fps):
+    destination = directory / "science-diagram.mp4"
     with tempconfig({
-        "renderer": "cairo", "pixel_width": 576, "pixel_height": 324, "frame_rate": fps,
+        "renderer": "cairo", "pixel_width": 1080, "pixel_height": 608, "frame_rate": fps,
         "background_color": "#102C2A", "media_dir": str(directory / "manim"),
         "output_file": str(destination), "format": "mp4", "progress_bar": "none",
         "verbosity": "WARNING", "disable_caching": True,
     }):
-        RainbowDrop().render()
+        DIAGRAMS[topic_id]().render()
     return destination
