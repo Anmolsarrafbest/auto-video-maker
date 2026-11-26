@@ -1,0 +1,186 @@
+"""Prepare, review, and publish distinct Shorts using the local machine."""
+
+import argparse
+import hashlib
+import re
+import sys
+
+import shorts
+
+PROGRESS = shorts.ROOT / "pilot-progress.json"
+PREFIX = "queue-"
+
+
+def jobs():
+    return sorted(
+        (job for job in shorts.completed_jobs() if job.name.startswith(PREFIX)),
+        key=lambda job: ((job / "metadata.json").stat().st_mtime_ns, job.name),
+    )
+
+
+def review_signature(job):
+    return {
+        name: hashlib.sha256((job / name).read_bytes()).hexdigest()
+        for name in ("short.mp4", "metadata.json")
+    }
+
+
+def approval_matches(job):
+    review = job / "review.json"
+    return review.is_file() and shorts.read_json(review) == review_signature(job)
+
+
+def prepare(args, topics):
+    if PROGRESS.is_file():
+        remote_topics = set(shorts.read_json(PROGRESS))
+    else:
+        remote_topics = set()
+    used = remote_topics | {
+        shorts.read_json(job / "metadata.json")["topic_id"] for job in shorts.completed_jobs()
+        if job.name.startswith(PREFIX) or (job / "upload.json").is_file()
+    }
+    available = [topic for topic in topics if topic["id"] not in used]
+    if args.topic:
+        selected = [topic for topic_id in dict.fromkeys(args.topic)
+                    for topic in available if topic["id"] == topic_id]
+        missing = set(args.topic) - {topic["id"] for topic in selected}
+        if missing:
+            raise ValueError(f"Unknown or already drafted: {', '.join(sorted(missing))}")
+    else:
+        styles = ("story", "demo", "myth", "quiz")
+        by_style = [[topic for topic in available if topic.get("format", "quiz") == style]
+                    for style in styles]
+        selected = [group[turn] for turn in range(len(available))
+                    for group in by_style if turn < len(group)][:args.count]
+    if not selected:
+        print("No unused sourced topics are available.")
+        return
+    trends = {} if args.offline else {region: shorts.fetch_trends(region) for region in ("IN", "US")}
+    for topic in selected:
+        job = shorts.OUTPUT / f"{PREFIX}{topic['id']}"
+        shorts.render_job(topic, "Review queue", args.seconds, job, trends=trends)
+        print(f"Awaiting review: {job.name}")
+
+
+def approve(job, topics):
+    if (job / "upload.json").is_file():
+        raise ValueError("This video already has an upload record.")
+    meta = shorts.read_json(job / "metadata.json")
+    topic = next((item for item in topics if item["id"] == meta["topic_id"]), None)
+    if topic is None or topic["source"] not in meta["description"]:
+        raise ValueError("The draft description must include its original fact source.")
+    default = shorts.youtube_metadata(topic)
+    allowed = {word.lower() for word in default["description"].splitlines()[-1].split()}
+    allowed.update("#" + shorts.cleaned(alias).replace(" ", "") for alias in topic["aliases"])
+    used = set(re.findall(r"(?<!\w)#[\w]+", meta["title"] + " " + meta["description"].lower()))
+    if any(tag.lower() not in allowed for tag in used):
+        raise ValueError("The draft contains a hashtag outside this topic's approved list.")
+    signature = review_signature(job)
+    for other in shorts.completed_jobs():
+        if other != job and ((other / "review.json").is_file() or (other / "upload.json").is_file()):
+            if review_signature(other)["short.mp4"] == signature["short.mp4"]:
+                raise ValueError(f"The same video file already appears in {other.name}.")
+    shorts.save_json(job / "review.json", signature)
+    print(f"Approved: {job.name}")
+
+
+def publish(args):
+    if not shorts.TOKEN.is_file():
+        raise ValueError("Connect the YouTube channel before publishing approved drafts.")
+    if shorts.read_json(shorts.TOKEN)["channel"]["id"] != args.channel_id:
+        raise ValueError("The selected channel does not match the connected account.")
+    date = shorts.today("Asia/Kolkata")
+    pilot_uploads = shorts.read_json(PROGRESS).values() if PROGRESS.is_file() else ()
+    pilot_today = sum(entry["date"] == date for entry in pilot_uploads)
+    limit = args.count - pilot_today
+    pending = [job for job in jobs() if approval_matches(job)]
+    for job in pending:
+        record = job / "upload.json"
+        if record.is_file() and shorts.read_json(record).get("video_id"):
+            continue
+        used_today = sum(shorts.read_json(path)["attempt_date"] == date
+                         for path in shorts.OUTPUT.glob("*/upload.json") if path != record)
+        if used_today >= limit:
+            break
+        shorts.publish(job, args.visibility, date, limit, allow_reviewed=True)
+    print("Queue run finished. Use status to see remaining drafts.")
+
+
+def status():
+    for job in jobs():
+        record = job / "upload.json"
+        video_id = shorts.read_json(record).get("video_id") if record.is_file() else None
+        stage = "uploaded" if video_id else ("approved" if approval_matches(job) else "awaiting review")
+        meta = shorts.read_json(job / "metadata.json")
+        metrics = job / "metrics.json"
+        result = shorts.read_json(metrics) if metrics.is_file() else None
+        outcome = (f" | {result['age_hours']}h: {result['stayed_to_watch']:.1f}% stayed, "
+                   f"{result['average_viewed']:.1f}% viewed, {result['engaged_views']} engaged views") if result else ""
+        url = f" | https://youtu.be/{video_id}" if video_id else ""
+        print(f"{stage:15} {job.name} [{meta['format']}] {meta['title']}{url}{outcome}")
+
+
+def record_metrics(args, job):
+    path = job / "upload.json"
+    if not path.is_file() or not shorts.read_json(path).get("video_id"):
+        raise ValueError("Record metrics only for an uploaded video.")
+    if (args.age_hours <= 0 or not 0 <= args.stayed <= 100 or
+            not 0 <= args.average < float("inf") or args.engaged < 0):
+        raise ValueError("Enter valid video age, percentages, and engaged views.")
+    shorts.save_json(job / "metrics.json", {"age_hours": args.age_hours, "stayed_to_watch": args.stayed,
+                                            "average_viewed": args.average, "engaged_views": args.engaged})
+    print(f"Saved Studio metrics for {job.name}.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    draft = sub.add_parser("prepare")
+    draft.add_argument("--count", type=int, choices=range(1, 21), default=4)
+    draft.add_argument("--seconds", type=int, choices=(12, 15, 20), default=15)
+    draft.add_argument("--topic", action="append")
+    draft.add_argument("--offline", action="store_true")
+    sub.add_parser("status")
+    sub.add_parser("approve").add_argument("job")
+    release = sub.add_parser("publish")
+    release.add_argument("--count", type=int, choices=(1, 2), default=1)
+    release.add_argument("--visibility", choices=("private", "unlisted", "public"), default="private")
+    release.add_argument("--channel-id", required=True)
+    metrics = sub.add_parser("metrics")
+    metrics.add_argument("job")
+    metrics.add_argument("--age-hours", type=int, required=True)
+    metrics.add_argument("--stayed", type=float, required=True)
+    metrics.add_argument("--average", type=float, required=True)
+    metrics.add_argument("--engaged", type=int, required=True)
+    args = parser.parse_args()
+    shorts.STATE.mkdir(exist_ok=True)
+    shorts.OUTPUT.mkdir(exist_ok=True)
+    try:
+        with shorts.FileLock(shorts.STATE / "worker.lock", timeout=0):
+            topics = shorts.read_json(shorts.ROOT / "topics.json")
+            if args.command == "prepare":
+                prepare(args, topics)
+            elif args.command == "status":
+                status()
+            elif args.command == "publish":
+                publish(args)
+            else:
+                job = next((item for item in jobs() if item.name == args.job), None)
+                if job is None:
+                    raise ValueError("Choose an existing queue job from the status command.")
+                if args.command == "approve":
+                    approve(job, topics)
+                else:
+                    record_metrics(args, job)
+    except shorts.Timeout:
+        sys.exit("Another Shorts command is running. Try again when it finishes.")
+    except shorts.RefreshError:
+        sys.exit("YouTube authorization expired. Run python shorts.py connect-youtube again.")
+    except shorts.requests.RequestException:
+        sys.exit("The network request failed. Retry the same queue job.")
+    except (KeyError, OSError, ValueError) as error:
+        sys.exit(str(error))
+
+
+if __name__ == "__main__":
+    main()

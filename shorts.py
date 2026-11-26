@@ -20,7 +20,7 @@ import requests
 from filelock import FileLock, Timeout
 from google.auth.exceptions import RefreshError
 
-from render import ANSWER_PAUSE, THINK_LINE, VOICE, encode, narration
+from render import ANSWER_PAUSE, THINK_LINE, VOICE, encode, narration, spoken_plan
 from youtube import read_json, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
@@ -38,6 +38,7 @@ TOPIC_TAGS = {
     "Space": ("astronomy", "space facts", "#SpaceFacts"),
     "Ocean": ("marine biology", "ocean facts", "#OceanFacts"),
     "Physics": ("physics", "everyday science", "#Physics"),
+    "History": ("history of science", "science biographies", "#ScienceHistory"),
 }
 
 
@@ -52,7 +53,7 @@ def youtube_metadata(topic, trends=None):
             if term in aliases:
                 tags.setdefault("#" + term.title().replace(" ", ""), None)
     return {
-        "title": topic["beats"][0],
+        "title": topic["beats"][0] if topic.get("format", "quiz") in {"quiz", "myth"} else topic["title"],
         "description": (
             f'{topic["beats"][1]}\n\nSource: {topic["source"]}\n\n'
             f'{ATTRIBUTION}\n\n{" ".join(tags)}'
@@ -95,6 +96,9 @@ def draft_beats(topic, seconds):
     if not key:
         print("GEMINI_FREE_API_KEY is unset. Using the sourced narration.", file=sys.stderr)
         return topic["beats"]
+    quiz = topic.get("format", "quiz") in {"quiz", "myth"}
+    opener = ("Start with a 4 to 9 word question ending in a question mark." if quiz else
+              "Start with a brief factual or visual hook matching the supplied opening.")
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
         headers={"x-goog-api-key": key},
@@ -102,7 +106,7 @@ def draft_beats(topic, seconds):
             "contents": [{"parts": [{"text": (
                 f"Rewrite the two supplied narration beats for a {seconds}-second English science Short. "
                 "Keep the facts, numbers, ordering, and meaning. Add no external information. "
-                "Start with a 4 to 9 word question ending in a question mark. Answer it in the "
+                f"{opener} Continue in the "
                 "second beat in at most 23 words. Use plain English and no politics or religion. Here are "
                 "the verified beats: " + json.dumps(topic["beats"])
             )}]}],
@@ -116,7 +120,7 @@ def draft_beats(topic, seconds):
             if isinstance(beats, list) and len(beats) == 2 and all(
                 isinstance(line, str) and 4 <= len(line.split()) <= 23
                 and len(line) <= 140 and "\n" not in line for line in beats
-            ) and beats[0].endswith("?") and len(beats[0].split()) <= 9:
+            ) and (not quiz or (beats[0].endswith("?") and len(beats[0].split()) <= 9)):
                 return beats
         except (ValueError, TypeError, IndexError, KeyError):
             pass
@@ -158,7 +162,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         except requests.RequestException:
             print("Gemini could not be reached. Using sourced narration.", file=sys.stderr)
     def write_audio(script):
-        return narration(script, seconds, VOICE_DIR / f"{VOICE}.onnx", wav)
+        return narration(script, seconds, VOICE_DIR / f"{VOICE}.onnx", wav, topic=topic)
 
     with tempfile.TemporaryDirectory(dir=STATE, prefix="render-") as directory:
         scratch = Path(directory) / "job"
@@ -173,18 +177,25 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             beats = topic["beats"]
             timings = write_audio(beats)
         encode(topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png")
+        style = topic.get("format", "quiz")
+        pause = ANSWER_PAUSE if style == "quiz" else .25
+        transition = (
+            f'Then say "{THINK_LINE}" and wait {pause:g} seconds before revealing the answer.\n'
+            if style == "quiz" else "Give the explanation immediately after a short natural beat.\n"
+        )
         save_json(scratch / "metadata.json", {
             "topic_id": topic["id"], "selection": provenance, "duration_seconds": seconds,
             **youtube_metadata(topic, trends),
-            "narration": [beats[0], THINK_LINE, beats[1]],
-            "answer_pause_seconds": ANSWER_PAUSE, "needs_review": beats != topic["beats"],
+            "narration": [line for _, line, _ in spoken_plan(topic, beats)],
+            "format": style, "source": topic["source"],
+            "answer_pause_seconds": pause, "needs_review": beats != topic["beats"],
             "made_for_kids": False, "synthetic_media": False,
         })
         (scratch / "flow-prompt.txt").write_text(
-            f'Create a vertical 9:16 {seconds}-second stylized science explainer.\n'
+            f'Create a vertical 9:16 {seconds}-second illustrated {style} Short.\n'
             f'Subject: {topic["title"]}.\n'
-            f'Open immediately with this spoken question: {beats[0]}\n'
-            f'Then say "{THINK_LINE}" and wait {ANSWER_PAUSE:g} seconds before revealing the answer.\n'
+            f'Open immediately with this spoken line: {beats[0]}\n'
+            f'{transition}'
             'Keep the opening visuals on the subject and save the explanation for the reveal.\n'
             f'Then answer it in voice-over: {beats[1]}\n'
             f'Illustrate the answer: {topic["labels"][0].lower()}, then {topic["labels"][1].lower()}.\n'

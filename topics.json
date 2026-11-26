@@ -1,5 +1,33 @@
 [
   {
+    "id": "katherine-johnson", "category": "History", "format": "story", "scene": "trajectory", "color": "#F2C18C",
+    "title": "Katherine Johnson double-checked a spaceflight", "labels": ["FRIENDSHIP 7", "ORBIT CALCULATIONS CHECKED BY HAND"],
+    "aliases": ["katherine johnson", "friendship 7"],
+    "beats": ["Before his orbital flight, John Glenn asked for one more check.", "Katherine Johnson redid the computer's calculations by hand. Her work helped give Glenn confidence to fly."],
+    "source": "https://www.nasa.gov/people-of-nasa/katherine-g-johnson/"
+  },
+  {
+    "id": "wright-first-flight", "category": "History", "format": "story", "scene": "flight", "color": "#EEC48B",
+    "title": "The Wright brothers’ twelve-second flight", "labels": ["KITTY HAWK, 1903", "12 SECONDS · 120 FEET"],
+    "aliases": ["wright brothers", "wright flyer", "kitty hawk first flight"],
+    "beats": ["The Wright brothers' first flight lasted twelve seconds.", "Orville flew just one hundred twenty feet. That short distance marked a breakthrough for controlled, powered flight."],
+    "source": "https://www.nps.gov/articles/wrightflyer.htm"
+  },
+  {
+    "id": "leavitt-stars", "category": "History", "format": "story", "scene": "cepheid", "color": "#D6BEFF",
+    "title": "How Henrietta Leavitt turned stars into distance markers", "labels": ["A REPEATING PULSE", "BRIGHTER CEPHEIDS PULSE MORE SLOWLY"],
+    "aliases": ["henrietta leavitt", "henrietta swan leavitt", "cepheid variable"],
+    "beats": ["Henrietta Leavitt found a pattern in pulsing stars.", "Brighter Cepheid stars pulse more slowly. Her discovery gave astronomers a way to estimate distances across space."],
+    "source": "https://science.nasa.gov/missions/roman-space-telescope/the-universe-is-expanding-faster-these-days-and-dark-energy-is-responsible-so-what-is-dark-energy/"
+  },
+  {
+    "id": "raman-light", "category": "History", "format": "demo", "scene": "raman", "color": "#85E4C6",
+    "title": "What C. V. Raman discovered about scattered light", "labels": ["ONE COLOR OF INCOMING LIGHT", "MOLECULES SHIFT SOME OF THE LIGHT"],
+    "aliases": ["c v raman", "raman effect", "raman scattering"],
+    "beats": ["Shine one color of light at a molecule.", "Raman found that a little of the scattered light changes color. The shift tells us something about the molecule."],
+    "source": "https://www.nobelprize.org/prizes/themes/the-nobel-prize-in-physics-1901-2000/"
+  },
+  {
     "id": "coral-animals", "category": "Ocean", "scene": "coral", "color": "#FF9B8D",
     "title": "Corals are animals", "labels": ["CORALS ARE ANIMALS", "TINY POLYPS BUILD THE REEF"],
     "aliases": ["coral", "coral reef", "coral reefs", "coral polyps"],
@@ -28,17 +56,17 @@
     "source": "https://ocean.si.edu/ocean-life/invertebrates/octopuses-squids-and-relatives"
   },
   {
-    "id": "rainbow-split", "category": "Physics", "scene": "rainbow", "color": "#FFBE86",
+    "id": "rainbow-split", "category": "Physics", "format": "demo", "scene": "rainbow", "color": "#FFBE86",
     "title": "How one raindrop splits sunlight", "labels": ["LIGHT ENTERS A DROP", "COLORS LEAVE AT DIFFERENT ANGLES"],
     "aliases": ["rainbow", "raindrop", "rainbows"],
-    "beats": ["How does a raindrop make a rainbow?", "Sunlight bends into the drop, reflects inside, then exits at different angles for different colors."],
+    "beats": ["Follow sunlight into a single raindrop.", "The light bends as it enters the drop, then reflects inside. Each color leaves at a slightly different angle."],
     "source": "https://www.usgs.gov/water-science-school/science/rainbows-water-and-light"
   },
   {
-    "id": "sky-blue", "category": "Physics", "scene": "scatter", "color": "#79BEFF",
+    "id": "sky-blue", "category": "Physics", "format": "myth", "scene": "scatter", "color": "#79BEFF",
     "title": "Why a clear sky looks blue", "labels": ["SUNLIGHT ENTERS THE ATMOSPHERE", "BLUE SCATTERS MORE THAN RED"],
     "aliases": ["blue sky", "rayleigh scattering", "sky blue"],
-    "beats": ["Why does a clear sky look blue?", "Air molecules scatter blue light more than red, sending blue light toward you from across the sky."],
+    "beats": ["Is the sky blue because it reflects the ocean?", "No. Air molecules scatter blue light more than red. That sends blue light toward you from across the sky."],
     "source": "https://science.nasa.gov/ems/03_behaviors/"
   },
   {

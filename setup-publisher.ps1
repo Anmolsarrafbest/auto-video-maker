@@ -9,7 +9,8 @@ param(
     [ValidateSet('private', 'unlisted', 'public')]
     [string]$Visibility = 'private',
     [ValidatePattern('^[A-Z]{2}$')]
-    [string]$Region = 'IN'
+    [string]$Region = 'IN',
+    [switch]$Queue
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +26,10 @@ if ($channelId -notmatch '^UC[A-Za-z0-9_-]{22}$') {
 $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
 $script = Join-Path $PSScriptRoot 'shorts.py'
 $arguments = '"{0}" daily --count {1} --seconds {2} --region {3} --upload {4} --channel-id {5}' -f $script, $Count, $Seconds, $Region, $Visibility, $channelId
+if ($Queue) {
+    $script = Join-Path $PSScriptRoot 'queue_publish.py'
+    $arguments = '"{0}" publish --count {1} --visibility {2} --channel-id {3}' -f $script, $Count, $Visibility, $channelId
+}
 $time = [datetime]::ParseExact($At, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
 $taskName = 'Auto Video Maker - YouTube Shorts'
 if ($PSCmdlet.ShouldProcess("$($channel.title) ($channelId)", "Schedule $Count $Visibility YouTube Short(s) daily at $At local PC time")) {

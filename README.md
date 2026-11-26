@@ -2,7 +2,7 @@
 
 Generate 12-, 15-, or 20-second vertical science Shorts with original animated illustrations, Piper narration, and captions. Draft generation works without a Gemini key or a YouTube account. Uploading uses the free YouTube Data API after you connect your channel.
 
-Each new Short opens with a spoken question, says “Think about it,” then waits 1.5 seconds before revealing the answer. An original instrumental groove with chords, bass, and light percussion comes forward in the pause. The Flow prompt asks for the same timing and music.
+Quiz Shorts ask a question, say “Think about it,” then wait 1.5 seconds. Science-history stories, myth checks, and visual demonstrations use different timing and sound arrangements. Shorter caption phrases follow the spoken sentences. The exported Flow prompt follows the selected format.
 
 ## Run locally on Windows
 
@@ -77,8 +77,38 @@ If an upload fails, rerun the task on the same day, or resume an older job expli
 
 The project is local. Credentials, generated videos, voice files, and upload records are ignored by Git. Keep those files on the same machine so daily counts, the used-topic history, and upload resumption survive restarts.
 
+## No-bill publishing queue
+
+Run the queue on your Windows PC. It uses local Piper narration, audio, illustrations, and FFmpeg. GitHub stores the code. The hosted pilot is paused. To resume its remaining topics locally, prepare them for review:
+
+```powershell
+python queue_publish.py prepare --topic rainbow-split --topic moon-distance --topic mars-sunset
+python queue_publish.py status
+```
+
+Use `python queue_publish.py prepare --count 4` to prepare a mixed batch of unused topics. Preview each MP4 in `output/` and confirm its factual claim, source, and visuals. Approve individual drafts after checking them. Editing the video or metadata clears the effective approval until you approve again.
+
+```powershell
+python queue_publish.py approve queue-katherine-johnson
+python queue_publish.py publish --count 1 --visibility public --channel-id 'YOUR_CONNECTED_CHANNEL_ID'
+```
+
+For daily uploads from the approved queue, use the Windows scheduler installer with `-Queue`. The PC needs to be on and signed in. The scheduler skips drafts that still need review.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-publisher.ps1 -Queue -At 18:30 -Count 1 -Visibility public
+```
+
+Record YouTube Studio metrics at the same age after upload so you can compare formats in `status`. Use your actual numbers:
+
+```powershell
+python queue_publish.py metrics queue-katherine-johnson --age-hours 48 --stayed 55 --average 81 --engaged 120
+```
+
+For strict zero GitHub runner spend, keep the cloud workflow disabled. If you later want to run hosted Actions, first check [GitHub Billing](https://github.com/settings/billing). GitHub blocks overages when the account has no valid payment method. If you use a payment method, verify an Actions budget with **Stop usage when budget limit is reached** before enabling hosted runs. [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions) · [GitHub budget settings](https://docs.github.com/en/billing/how-tos/set-up-budgets)
+
 ## Five-Short cloud pilot
 
 The private GitHub repository's **Five-Short cloud pilot** workflow tests the uploader on a hosted Linux runner. It is specific to the Skill_issue channel and uses the repository Actions secret `YOUTUBE_TOKEN_JSON`. The Git history contains only pilot topic IDs, dates, and public video IDs. Keep the secret out of source control.
 
-An on-demand run starts the pilot. The schedule runs at about 6:37 p.m. India time, uploads at most two public Shorts per India calendar day, and disables itself after five. See `pilot-progress.json` in the repository for completed uploads. A reservation with no video ID stops further uploads until the channel owner checks YouTube Studio and reconciles the record. This protects against a second upload after a runner interruption.
+When enabled, the pilot can run on demand or around 6:37 p.m. India time, uploads at most two public Shorts per India calendar day, and disables itself after five. See `pilot-progress.json` for completed uploads. A reservation with no video ID stops further uploads until the channel owner checks YouTube Studio and reconciles the record. This protects against a second upload after a runner interruption. Finish the outstanding topics through either the local queue or the hosted pilot, since they use separate upload records.

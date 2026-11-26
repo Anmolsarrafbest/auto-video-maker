@@ -2,8 +2,10 @@
 
 import math
 from array import array
+from bisect import bisect_right
 import os
 import random
+import re
 import subprocess
 import wave
 
@@ -13,6 +15,20 @@ WIDTH, HEIGHT, FPS = 720, 1280, 24
 VOICE = "en_US-hifi_tts_92-medium"
 THINK_LINE = "Think about it."
 ANSWER_PAUSE = 1.5
+
+
+def spoken_plan(topic, beats):
+    """Share the audio and caption schedule for a topic's editorial format."""
+    style = topic.get("format", "quiz")
+    plan = [("hook", beats[0], .14)]
+    if style == "quiz":
+        plan.append(("pause", THINK_LINE, .18))
+    parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+", beats[1])
+    # Keep brief replies such as “No.” attached to the explanation.
+    if len(parts) > 1 and len(parts[0].split()) < 4:
+        parts[:2] = [" ".join(parts[:2])]
+    reveal_gap = ANSWER_PAUSE if style == "quiz" else .25
+    return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
 
 
 def font(size, bold=False):
@@ -65,6 +81,45 @@ def illustration(draw, scene, accent, time, beat):
         draw.arc((earth_x - 48, y - 54, earth_x + 46, y + 53), 105, 284, fill="#63CEBA", width=10)
         circle(draw, 477 + offset, y, 40, accent)
         circle(draw, 466 + offset, y - 9, 11, "#8A709C" if scene == "distance" else "#B9574D")
+    elif scene == "trajectory":
+        draw.ellipse((143, y - 116, 553, y + 116), outline="#587294", width=3)
+        circle(draw, x, y, 75, "#295887", "#8ABCCD", 3)
+        draw.arc((x - 53, y - 53, x + 50, y + 51), 24, 157, fill="#6FC0A6", width=12)
+        angle = time * .7
+        px, py = x + 205 * math.cos(angle), y + 116 * math.sin(angle)
+        draw.polygon([(px, py - 13), (px + 13, py + 10), (px - 13, py + 10)], fill=accent)
+        if beat:
+            for dx in (-178, 172):
+                draw.line((x + dx, y + 85, x + dx + 10, y + 94, x + dx + 24, y + 74),
+                          fill="#75E2C1", width=4)
+    elif scene == "flight":
+        draw.line((107, 638, 595, 638), fill="#9A8068", width=5)
+        for step in range(118, 594, 32):
+            draw.line((step, 638, step, 650), fill="#9A8068", width=3)
+        px = 150 + min(1, time / 6) * 370
+        py = 588 - 105 * math.sin(math.pi * min(1, time / 6))
+        for offset in (-21, 13):
+            draw.line((px - 56, py + offset, px + 57, py + offset), fill=accent, width=8)
+        for offset in (-41, 36):
+            draw.line((px + offset, py - 22, px + offset, py + 15), fill="#D59E73", width=4)
+        draw.line((px - 22, py + 17, px + 45, py + 17, px + 64, py + 5), fill="#F2E0C0", width=4)
+    elif scene == "cepheid":
+        for center, cycle, size in ((211, 1.8, 39), (480, 3.5, 56)):
+            phase = math.sin(time * math.tau / cycle)
+            circle(draw, center, y - 38, size + phase * 13, "#403865")
+            circle(draw, center, y - 38, size * .61 + phase * 10, accent if center == 480 else "#A391D2")
+            points = [(center - 84 + i, y + 105 - 23 * math.sin((time + i / 58) * math.tau / cycle))
+                      for i in range(169)]
+            draw.line(points, fill=accent, width=3)
+    elif scene == "raman":
+        draw.line((100, y, x - 35, y), fill=accent, width=6)
+        for dx, dy in ((-23, 12), (0, -18), (25, 11)):
+            circle(draw, x + dx, y + dy, 16, "#28697D", "#D6FFF7", 2)
+        for ray in (-1, 1):
+            draw.line((x + 39, y, 584, y + ray * 95),
+                      fill="#F8B475" if beat and ray == 1 else accent, width=4)
+            phase = (time * 1.4) % 1
+            circle(draw, x + 39 + phase * 197, y + ray * 95 * phase, 5, "#F8F3D5")
     elif scene == "coral":
         draw.ellipse((128, 628, 569, 672), fill="#233654")
         for i, (dx, height) in enumerate(((-150, 72), (-92, 169), (-42, 121), (20, 203), (76, 156), (134, 95))):
@@ -164,13 +219,19 @@ def frames(topic, beats, timings, seconds):
         headline = font(42, True)
     draw.multiline_text((55, 184), wrap(beats[0], headline, 576), font=headline,
                         fill="#F7F3EA", spacing=2)
-    caption_font = font(39, True)
-    if wrap(beats[1], caption_font, 526).count("\n") > 3:
-        caption_font = font(34, True)
+    plan = spoken_plan(topic, beats)
+    starts = [start for start, _ in timings]
+    captions = []
+    for role, text, _ in plan:
+        face = font(39, True)
+        if wrap(text, face, 526).count("\n") > 3:
+            face = font(34, True)
+        captions.append((wrap(text, face, 526) if role != "hook" else "", face))
     label_font = font(23, True)
     for index in range(seconds * FPS):
         time = index / FPS
-        beat = int(time >= timings[2][0])
+        part = max(0, bisect_right(starts, time) - 1)
+        beat = int(plan[part][0] == "answer")
         img = background.copy()
         draw = ImageDraw.Draw(img)
         illustration(draw, topic["scene"], accent, time, beat)
@@ -178,27 +239,34 @@ def frames(topic, beats, timings, seconds):
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 550 else font(20, True),
                       fill=accent, anchor="mm")
-        caption = beats[1] if beat else THINK_LINE if time >= timings[1][0] else ""
+        caption, face = captions[part]
         if caption:
             draw.rounded_rectangle((54, 811, 642, 1029), radius=24, fill="#0D1527", outline="#31415E", width=2)
-            draw.multiline_text((348, 916), wrap(caption, caption_font, 526), font=caption_font,
+            draw.multiline_text((348, 916), caption, font=face,
                                 fill="#F7F3EA", anchor="mm", align="center", spacing=7)
         draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill="#405273")
         draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
         yield img
 
 
-def mix_music(audio, rate, timings):
+def mix_music(audio, rate, timings, style="quiz"):
     """Build an original groove from sustained chords, bass and brushed percussion."""
     samples = array("h")
     samples.frombytes(audio)
-    bar_length = 2.4
+    beat_length, transpose, percussion = {
+        "quiz": (.6, 1, 1),
+        "story": (.72, .89, .40),
+        "myth": (.53, 1.12, .85),
+        "demo": (.62, 1.06, .68),
+    }[style]
+    bar_length = beat_length * 4
     # Am7, Fmaj7, Cmaj7, Gadd9. Add a fresh chord every four beats.
     chords = ((110, 220, 261.63, 329.63, 392),
               (87.31, 174.61, 220, 261.63, 329.63),
               (130.81, 261.63, 329.63, 392, 493.88),
               (98, 196, 246.94, 293.66, 440))
-    random_noise = random.Random(42)
+    chords = [tuple(note * transpose for note in chord) for chord in chords]
+    random_noise = random.Random(style)
     for index, speech in enumerate(samples):
         time = index / rate
         bar = time % bar_length
@@ -208,32 +276,34 @@ def mix_music(audio, rate, timings):
             math.sin(math.tau * note * time) + .2 * math.sin(math.tau * note * 2.003 * time)
             for note in tones
         ) / len(tones)
-        pulse = bar % .6
+        pulse = bar % beat_length
         bass = 1850 * min(1, pulse * 75) * math.exp(-pulse * 3) * math.sin(math.tau * root * pulse)
         kick = 900 * math.exp(-pulse * 25) * math.sin(math.tau * (45 * pulse + .7 * (1 - math.exp(-35 * pulse))))
-        brush = 590 * random_noise.uniform(-1, 1) * math.exp(-(bar % .3) * 40)
-        melody_time = bar % .6
-        note = tones[(0, 2, 1, 3)[min(3, int(bar / .6))]] * 2
+        brush = 590 * random_noise.uniform(-1, 1) * math.exp(-(bar % (beat_length / 2)) * 40)
+        melody_time = pulse
+        note = tones[(0, 2, 1, 3)[min(3, int(bar / beat_length))]] * 2
         keys = 700 * min(1, melody_time * 60) * math.exp(-melody_time * 6) * math.sin(math.tau * note * melody_time)
         distance = min(max(start - time, time - end, 0) for start, end in timings)
         duck = .53 + .47 * min(1, distance / .14)
         fade = min(1, (time + .03) * 8, (len(samples) - index) / (.38 * rate))
-        samples[index] = round(speech * .76 + 1.45 * fade * duck * (pad + bass + kick + brush + keys))
+        music = pad + bass + percussion * (kick + brush) + keys
+        samples[index] = round(speech * .76 + 1.45 * fade * duck * music)
     return samples.tobytes()
 
 
-def narration(beats, seconds, voice_path, destination):
+def narration(beats, seconds, voice_path, destination, *, topic=None):
     from piper import PiperVoice, SynthesisConfig
 
     if not voice_path.is_file():
         raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
     voice = PiperVoice.load(voice_path)
     rate = voice.config.sample_rate
-    lines = (beats[0], THINK_LINE, beats[1])
-    gaps = (.14, .18, ANSWER_PAUSE)
+    topic = topic or {}
+    plan = spoken_plan(topic, beats)
+    gaps = [gap for _, _, gap in plan]
     for pace in (1, .92, .84, .76):
         clips = [b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(
-            line, syn_config=SynthesisConfig(length_scale=pace))) for line in lines]
+            line, syn_config=SynthesisConfig(length_scale=pace))) for _, line, _ in plan]
         if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
             break
     else:
@@ -249,7 +319,7 @@ def narration(beats, seconds, voice_path, destination):
         timings.append((start / rate, end / rate))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        wav.writeframes(mix_music(audio, rate, timings))
+        wav.writeframes(mix_music(audio, rate, timings, topic.get("format", "quiz")))
     return timings
 
 
