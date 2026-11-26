@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -11,8 +12,8 @@ from local_secrets import secret
 
 CACHE = Path(__file__).resolve().parent / "assets-cache"
 PROGRAMS = {
-    "ambient synth": (89, 81), "felt piano": (0, 46), "syncopated marimba": (12, 11),
-    "slow instrumental swell": (48, 10), "orbital groove": (38, 4),
+    "ambient synth": (89, 81, 38), "felt piano": (0, 46, 32), "syncopated marimba": (12, 11, 32),
+    "slow instrumental swell": (48, 10, 33), "orbital groove": (89, 4, 38),
 }
 
 
@@ -22,8 +23,9 @@ def midi_music(destination, theme, score, topic_id, seconds):
         return False
     import mido
 
-    beat, chords, motif, _, _ = score
-    root_shift = random.Random(topic_id).choice((-2, 0, 2))
+    beat, chords, motif, percussion, _ = score
+    rng = random.Random(topic_id)
+    root_shift = rng.choice((-2, 0, 2))
     midi = mido.MidiFile()
     track = midi.add_track()
     track.append(mido.MetaMessage("set_tempo", tempo=round(beat * 1_000_000)))
@@ -31,15 +33,29 @@ def midi_music(destination, theme, score, topic_id, seconds):
         track.append(mido.Message("program_change", channel=channel, program=program))
     ticks = midi.ticks_per_beat
     events = []
+    groove_gain = .65 + .35 * percussion
+
+    def add_note(position, channel, note, velocity, duration):
+        start = round(position * ticks)
+        events.extend(((start, channel, note, velocity),
+                       (start + round(duration * ticks), channel, note, 0)))
+
     for index in range(int(seconds / beat) + 1):
         chord = chords[(index // 4) % len(chords)]
         notes = [(1, chord[1 + motif[index % 4]] + 12, 66, .70)]
         if index % 4 == 0:
             notes += [(0, note, 48, 3.8) for note in chord]
         for channel, note, velocity, duration in notes:
-            note += root_shift
-            events.extend(((index * ticks, channel, note, velocity),
-                           (index * ticks + round(duration * ticks), channel, note, 0)))
+            add_note(index, channel, note + root_shift, velocity, duration)
+        backbeat = index % 2
+        drum = (37 if theme in {"felt piano", "slow instrumental swell"} else 38) if backbeat else 36
+        add_note(index, 9, drum, round((49 if backbeat else 75) * groove_gain), .16)
+        for offset, velocity in ((0, 43), (.5, 29)):
+            add_note(index + offset, 9, 42, round((velocity + rng.randint(-5, 5)) * groove_gain), .10)
+        if index % 4 in (0, 1, 3):
+            offset = 0 if index % 4 == 0 else .5
+            bass = chord[0] + root_shift - (12 if chord[0] > 47 else 0)
+            add_note(index + offset, 2, bass + (7 if index % 4 == 3 else 0), 61, .42)
     previous = 0
     for position, channel, note, velocity in sorted(events):
         track.append(mido.Message("note_on", channel=channel, note=note, velocity=velocity,
@@ -63,6 +79,7 @@ def midi_music(destination, theme, score, topic_id, seconds):
             raise ValueError("Unable to load the configured SoundFont.")
         for channel, program in enumerate(PROGRAMS[theme]):
             synth.program_select(channel, bank, 0, program)
+        synth.program_select(9, bank, 128, 0)
         with wave.open(str(destination), "wb") as output:
             output.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
             for message in midi:
@@ -101,22 +118,33 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues):
     if source:
         cmd += ["-stream_loop", "-1", "-i", str(source)]
         graph[0] = graph[0].replace("[voice]", ",asplit=2[voice][key]")
+        space = "aecho=0.8:0.88:55:0.22," if music == "SoundFont MIDI" else ""
         graph += [
             f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{seconds},"
-            f"volume=0.47,afade=t=in:d=0.25,afade=t=out:st={max(0, seconds - .6)}:d=0.6[bed]",
+            f"{space}volume=0.47,afade=t=in:d=0.25,afade=t=out:st={max(0, seconds - .6)}:d=0.6[bed]",
             "[bed][key]sidechaincompress=threshold=0.025:ratio=5:attack=25:release=330[duck]",
         ]
         mix.append("[duck]")
         next_input += 1
     effect = topic.get("episode_plan", {}).get("sound", "sweep")
     cue_count = 0
-    for time, filename in zip(cues, ({"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], "chime")):
+    reveal, outro = cues
+    cue_plan = ((0, "whoosh", .30), (reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65),
+                (outro, "chime", .65))
+    for time, filename, duration in cue_plan:
         path = CACHE / "sfx" / f"{filename}.wav"
         if path.is_file():
+            analysis = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path), "-t", str(duration),
+                                       "-af", "volumedetect", "-f", "null", "-"],
+                                      capture_output=True, text=True, check=True)
+            peak = re.search(r"max_volume:\s*(-?[\d.]+) dB", analysis.stderr)
+            gain = min(9, -20 - float(peak[1])) if peak else -20
             cmd += ["-i", str(path)]
             label = f"[cue{next_input}]"
             graph.append(f"[{next_input}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
-                         f"atrim=0:1,volume=0.55,adelay={round(time * 1000)}:all=1{label}")
+                         f"atrim=0:{duration},volume={gain:.2f}dB,"
+                         f"afade=t=out:st={duration - .08}:d=0.08,"
+                         f"adelay={round(time * 1000)}:all=1{label}")
             mix.append(label)
             next_input += 1
             cue_count += 1

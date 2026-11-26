@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
+import sys
 import time
 from urllib.parse import quote, urlparse
 
@@ -47,7 +49,7 @@ def candidates(query, provider):
             yield {"id": info["nasa_id"], "kind": info["media_type"], "title": info["title"],
                    "source": "https://images.nasa.gov/details/" + quote(info["nasa_id"], safe=""),
                    "credit": info.get("photographer") or info.get("center") or "NASA",
-                   "collection": item["href"]}
+                   "collection": item["href"], "keywords": " ".join(info.get("keywords") or ())}
         return
     key = secret("PEXELS_API_KEY" if provider == "pexels" else "PIXABAY_API_KEY")
     if not key:
@@ -63,12 +65,16 @@ def candidates(query, provider):
                              and file["height"] > file["width"] and file.get("file_type") == "video/mp4"]
                     if not files:
                         continue
-                    file = min(files, key=lambda entry: abs(entry["width"] - 1080))
+                    file = min(files, key=lambda entry: (entry["width"] < 1080, abs(entry["width"] - 1080)))
                     url, credit = file["link"], item["user"]["name"]
+                    width, height = file["width"], file["height"]
                 else:
                     url, credit = item["src"]["large2x"], item["photographer"]
-                yield {"id": str(item["id"]), "kind": kind, "title": credit,
-                       "source": item["url"], "credit": f"{credit} / Pexels", "url": url}
+                    width, height = item["width"], item["height"]
+                title = item.get("alt") or urlparse(item["url"]).path.strip("/").replace("-", " ")
+                yield {"id": str(item["id"]), "kind": kind, "title": title,
+                       "source": item["url"], "credit": f"{credit} / Pexels", "url": url,
+                       "width": width, "height": height}
         return
     for kind, endpoint in (("video", "videos/"), ("image", "")):
         params = {"key": key, "q": query, "per_page": 5, "safesearch": "true"}
@@ -79,11 +85,14 @@ def candidates(query, provider):
                 files = [file for file in item["videos"].values() if 0 < file["width"] < file["height"]]
                 if not files:
                     continue
-                url = min(files, key=lambda file: abs(file["width"] - 1080))["url"]
+                file = min(files, key=lambda entry: (entry["width"] < 1080, abs(entry["width"] - 1080)))
+                url, width, height = file["url"], file["width"], file["height"]
             else:
                 url = item["largeImageURL"]
+                width, height = item["imageWidth"], item["imageHeight"]
             yield {"id": str(item["id"]), "kind": kind, "title": item["tags"],
-                   "source": item["pageURL"], "credit": f"{item['user']} / Pixabay", "url": url}
+                   "source": item["pageURL"], "credit": f"{item['user']} / Pixabay", "url": url,
+                   "width": width, "height": height}
 
 
 def cache(topic_id, record):
@@ -94,7 +103,10 @@ def cache(topic_id, record):
             raise ValueError("Unexpected NASA asset collection host.")
         assets = get(collection)
         extension = (".mp4",) if kind == "video" else (".jpg", ".jpeg", ".png")
-        available = [url for url in assets if urlparse(url).path.lower().endswith(extension)]
+        available = [urlparse(url)._replace(scheme="https").geturl() for url in assets
+                     if urlparse(url).scheme in {"http", "https"}
+                     and urlparse(url).hostname == "images-assets.nasa.gov"
+                     and urlparse(url).path.lower().endswith(extension)]
         quality = ("~medium", "~large", "~orig") if kind == "video" else ("~orig", "~large", "~medium")
         record["url"] = next((url for tag in quality for url in available if tag in url),
                              available[0] if available else "")
@@ -131,7 +143,47 @@ def cache(topic_id, record):
         finally:
             temporary.unlink(missing_ok=True)
     return {"file": filename, "kind": kind, "source": record["source"], "credit": record["credit"],
-            "synthetic": bool(record.get("synthetic"))}
+            "synthetic": bool(record.get("synthetic")), "automatic": bool(record.get("automatic"))}
+
+
+def illustration_request(query):
+    prompt = f"Vertical 9:16 editorial science illustration, no text or logos: {query}"
+    return {"kind": "image", "source": "https://pollinations.ai/", "synthetic": True,
+            "credit": "AI illustration generated with Pollinations",
+            "url": f"https://gen.pollinations.ai/image/{quote(prompt, safe='')}?width=1080&height=1920"}
+
+
+def ranked_matches(query, providers):
+    terms = set(re.findall(r"\w+", query.casefold())) - {"with", "the", "and", "from", "for", "a", "of", "on"}
+    ranked = []
+    for provider in providers:
+        try:
+            matches = list(candidates(query, provider))
+        except (requests.RequestException, OSError, ValueError):
+            print(f"{provider}: search unavailable.", file=sys.stderr)
+            continue
+        for match in matches:
+            words = set(re.findall(r"\w+", (match["title"] + " " + match.get("keywords", "")).casefold()))
+            overlap = len(terms & words)
+            if terms and not overlap:
+                continue
+            width, height = match.get("width", 0), match.get("height", 0)
+            portrait_hd = width >= 720 and height >= 1280 and width < height
+            shape = 2 if portrait_hd else 1 if not width else 0
+            closeness = -abs(width / height - 9 / 16) if height else -1
+            ranked.append(((shape, overlap, closeness, match["kind"] == "video", min(width, 2160)), match))
+    return [match for _, match in sorted(ranked, key=lambda item: item[0], reverse=True)]
+
+
+def cache_best(topic, query, providers, pollinations_fallback):
+    for match in ranked_matches(query, providers)[:8]:
+        try:
+            return cache(topic, dict(match, automatic=True))
+        except (requests.RequestException, OSError, ValueError):
+            print(f"Skipped unavailable asset {match['id']}.", file=sys.stderr)
+    if pollinations_fallback:
+        return cache(topic, dict(illustration_request(query), automatic=True))
+    raise ValueError("No matching visual could be cached. Try another search or provider.")
 
 
 def selected(topic_id):
@@ -149,18 +201,30 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("topic", choices=[topic["id"] for topic in shorts.read_json(shorts.ROOT / "topics.json")])
     parser.add_argument("query")
-    parser.add_argument("--provider", choices=("nasa", "pexels", "pixabay", "pollinations"), default="nasa")
-    parser.add_argument("--use", metavar="ID", help="Cache the reviewed match, or use 'generate' for Pollinations")
+    parser.add_argument("--provider", choices=("nasa", "pexels", "pixabay", "pollinations"))
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--use", metavar="ID", help="Cache the reviewed match, or use 'generate' for Pollinations")
+    selection.add_argument("--auto", action="store_true", help="Rank matches and cache the best available visual")
+    parser.add_argument("--pollinations-fallback", action="store_true", help="Try a keyless illustration after --auto")
     args = parser.parse_args()
+    if args.pollinations_fallback and not args.auto:
+        parser.error("--pollinations-fallback requires --auto.")
+    provider = args.provider or "nasa"
     try:
-        if args.provider == "pollinations":
+        if args.auto:
+            if args.provider == "pollinations":
+                parser.error("Use --pollinations-fallback with --auto, or request --use generate.")
+            providers = [args.provider] if args.provider else [
+                name for name in ("pexels", "pixabay", "nasa")
+                if name == "nasa" or secret(name.upper() + "_API_KEY")
+            ]
+            selected_asset = cache_best(args.topic, args.query, providers, args.pollinations_fallback)
+        elif provider == "pollinations":
             if args.use != "generate":
                 parser.error("Use --use generate to request one keyless AI illustration.")
-            record = {"kind": "image", "source": "https://pollinations.ai/", "synthetic": True,
-                      "credit": "AI illustration generated with Pollinations",
-                      "url": f"https://gen.pollinations.ai/image/{quote(args.query, safe='')}?width=1080&height=1920"}
+            selected_asset = cache(args.topic, illustration_request(args.query))
         else:
-            matches = list(candidates(args.query, args.provider))
+            matches = list(candidates(args.query, provider))
             if not args.use:
                 for match in matches:
                     print(f"{match['id']}  {match['kind']}  {match['title']}  {match['source']}")
@@ -168,12 +232,14 @@ def main():
             record = next((match for match in matches if match["id"] == args.use), None)
             if not record:
                 raise ValueError("That ID was not found in the provider results.")
-        shorts.save_json(CACHE / f"{args.topic}.json", cache(args.topic, record))
-        print(f"Visual cached for {args.topic}.")
+            selected_asset = cache(args.topic, record)
+        shorts.save_json(CACHE / f"{args.topic}.json", selected_asset)
+        print(f"Visual cached for {args.topic}. Review the match: {selected_asset['source']}")
     except requests.HTTPError as error:
         parser.exit(1, f"Visual provider returned HTTP {error.response.status_code}. Cached assets remain available.\n")
     except (requests.RequestException, OSError, ValueError) as error:
-        parser.exit(1, f"Visual setup failed ({type(error).__name__}). Cached assets remain available.\n")
+        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+        parser.exit(1, f"Visual setup failed ({reason}). Cached assets remain available.\n")
 
 
 if __name__ == "__main__":

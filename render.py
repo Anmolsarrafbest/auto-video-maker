@@ -11,9 +11,9 @@ import shutil
 import subprocess
 import wave
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from hindi_captions import ass_filter
+from hindi_captions import ass_filter, topic_badge
 from audio_master import master
 from local_secrets import secret
 from local_voices import windows_pcm
@@ -154,6 +154,62 @@ def visual_shade(size):
     mask.putdata([round(72 * max(0, (row / max(1, size[1] - 1) - .55) / .45) ** 2)
                   for row in range(size[1])])
     return mask.resize(size)
+
+
+def native_coordinates(coords):
+    scale = OUTPUT_SIZE[0] / WIDTH
+    if isinstance(coords[0], (tuple, list)):
+        return [native_coordinates(point) for point in coords]
+    return tuple(round(value * scale) for value in coords)
+
+
+def native_font(size, bold=False):
+    return font(round(size * OUTPUT_SIZE[0] / WIDTH), bold)
+
+
+class NativeOverlay:
+    """Draw UI coordinates directly on the output canvas."""
+
+    def __init__(self, image):
+        self.draw = ImageDraw.Draw(image)
+
+    def text(self, point, text, **kwargs):
+        self.draw.text(native_coordinates(point), text, **kwargs)
+
+    def multiline_text(self, point, text, **kwargs):
+        self.draw.multiline_text(native_coordinates(point), text, **kwargs)
+
+    def rectangle(self, coords, **kwargs):
+        self.draw.rectangle(native_coordinates(coords), **kwargs)
+
+    def rounded_rectangle(self, coords, *, radius, width=1, **kwargs):
+        scale = OUTPUT_SIZE[0] / WIDTH
+        self.draw.rounded_rectangle(native_coordinates(coords), radius=round(radius * scale),
+                                    width=round(width * scale), **kwargs)
+
+    def line(self, coords, *, fill, width=1):
+        self.draw.line(native_coordinates(coords), fill=fill, width=round(width * OUTPUT_SIZE[0] / WIDTH))
+
+    def ellipse(self, coords, *, outline, width=1):
+        self.draw.ellipse(native_coordinates(coords), outline=outline,
+                          width=round(width * OUTPUT_SIZE[0] / WIDTH))
+
+
+def place_visual(shot, position, time, *, portrait=False):
+    opening_scale = ease_cubic(time / .075) if time < .075 else 1 - ease_cubic((time - .075) / .225)
+    punch = .09 * opening_scale
+    if portrait:
+        img = camera_shot(shot, OUTPUT_SIZE, 1, 1, zoom=punch) if punch else shot
+        img.paste((8, 12, 23), (0, 0, *OUTPUT_SIZE), visual_shade(OUTPUT_SIZE))
+        return img
+    small = ImageOps.fit(shot, (135, 240), Image.Resampling.BILINEAR)
+    blur = small.filter(ImageFilter.GaussianBlur(15))
+    backdrop = Image.blend(blur, Image.new("RGB", blur.size, (8, 12, 23)), .69)
+    img = backdrop.resize(OUTPUT_SIZE, Image.Resampling.BILINEAR)
+    if punch:
+        shot = camera_shot(shot, shot.size, 1, 1, zoom=punch)
+    img.paste(shot, position)
+    return img
 
 
 @lru_cache(maxsize=72)
@@ -336,57 +392,28 @@ def illustration(draw, scene, accent, time, beat):
 def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(), visual_label=None):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
-    base, tint, border, caption_fill, radius = PALETTES[theme]
-    background = Image.new("RGB", (WIDTH, HEIGHT))
-    draw = ImageDraw.Draw(background)
-    for y in range(HEIGHT):
-        glow = max(0, 1 - abs(y - 545) / 650)
-        draw.line((0, y, WIDTH, y), fill=tuple(component + int(change * glow)
-                                              for component, change in zip(base, tint)))
-    if theme == "lab":
-        for x in range(77, 640, 33):
-            draw.line((x, 336, x, 743), fill="#23463F")
-        for y in range(345, 744, 33):
-            draw.line((64, y, 630, y), fill="#23463F")
-    elif theme == "archive":
-        for y in range(350, 750, 32):
-            draw.line((70, y, 627, y), fill="#513932")
-            draw.line((70, y - 4, 87, y - 4), fill=border)
-    elif theme == "ocean":
-        for index in range(9):
-            path = [(x, 349 + index * 47 + 10 * math.sin(x / 62 + index)) for x in range(66, 631, 7)]
-            draw.line(path, fill="#1D4657", width=2)
-    else:
-        rng = random.Random(topic["id"])
-        for _ in range(64):
-            x, y = rng.randrange(62, 641), rng.randrange(336, 752)
-            circle(draw, x, y, rng.choice((1, 1, 2)), "#465677")
+    base, _, border, caption_fill, radius = PALETTES[theme]
     hindi = topic.get("language") == "hi"
-    if not hindi:
-        draw.text((58, 140), topic["category"].upper(), font=font(25, True), fill=accent)
     plan = spoken_plan(topic, beats)
-    heading = beats[0] if plan[0][0] == "hook" else topic["title"]
-    headline = font(53, True, serif=theme in {"archive", "paper", "copper"})
-    if wrap(heading, headline, 576).count("\n") > 1:
-        headline = font(42, True, serif=theme == "archive")
-    if not hindi:
-        draw.multiline_text((55, 184), wrap(heading, headline, 576), font=headline,
-                            fill="#F7F3EA", spacing=2)
+    badge = topic_badge(topic)
+    badge_font = native_font(25, True)
+    badge_width = badge_font.getlength(badge) / 1.5
     photograph = None
     if archive_path:
         with Image.open(archive_path) as source:
             photograph = ImageOps.contain(source.convert("RGB"), (1080, 1080), Image.Resampling.LANCZOS)
     layout = episode(topic)[1]
     starts = [start for start, _ in timings]
-    takeaway_font = font(35, True)
-    label_font = font(23, True)
+    takeaway_font = native_font(35, True)
+    label_font = native_font(23, True)
     reveal, outro = motion_cues(topic, beats, timings, seconds)
+    answer_gap = next(gap for role, _, gap in plan if role == "answer")
+    pause_start = reveal - answer_gap
     recap_start = timings[-1][1] + .15
     recap_steps = ("Light bends as it enters", "It reflects once inside",
                    "The colors exit at different angles")
     motion = topic.get("episode_plan", {}).get("motion", "underline")
     archive_duration = seconds * topic.get("archive_fraction", .73)
-    canvas = background.resize(OUTPUT_SIZE, Image.Resampling.BICUBIC)
     coordinate_scale = OUTPUT_SIZE[0] / WIDTH
 
     def native_size(width, height):
@@ -399,14 +426,10 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         replay_progress = min(1, max(0, (time - recap_start) / max(.1, outro - recap_start)))
         part = max(0, bisect_right(starts, time) - 1)
         beat = int(plan[part][0] == "answer")
-        img = canvas.copy()
-        overlay = Image.new("RGBA", (WIDTH, HEIGHT))
-        draw = ImageDraw.Draw(overlay)
+        credit = None
         archive_shot = (bool(clip) or photograph is not None) and time < archive_duration
         opacity = ease_cubic((archive_duration - time) / .65) if archive_shot else 0
-        if opacity == 1:
-            pass
-        elif diagram and beat:
+        if opacity < 1 and diagram and beat:
             diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
             if replay:
                 diagram_frame = round(replay_progress * (len(diagram) - 1))
@@ -415,8 +438,8 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             width = WIDTH + round(32 * drift)
             height = round(456 * width / WIDTH)
             shot = shot.resize(native_size(width, height), Image.Resampling.BICUBIC)
-            img.paste(shot, native_size((WIDTH - width) / 2, 300 - (height - 456) / 2))
-        else:
+            img = place_visual(shot, native_size((WIDTH - width) / 2, 300 - (height - 456) / 2), time)
+        elif opacity < 1:
             if layout in {"space film", "experiment"}:
                 stage = SupersampledShapes(base)
                 illustration(stage, topic["scene"], accent, time, beat)
@@ -432,48 +455,56 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
                 bounds = tuple(a + (b - a) * ease for a, b in zip(wide, (96, 384, 625, 689)))
                 shot = ImageOps.fit(stage.image.crop(stage.points(bounds)),
                                     native_size(WIDTH, 490), Image.Resampling.LANCZOS)
-                img.paste(shot, native_size(0, 313 if layout == "space film" else 330))
+                img = place_visual(shot, native_size(0, 313 if layout == "space film" else 330), time)
             else:
                 stage = SupersampledShapes(base)
                 illustration(stage, topic["scene"], accent, time, beat)
                 shot = ImageOps.fit(stage.image.crop(stage.points((54, 319, 646, 752))),
                                     native_size(WIDTH, 490), Image.Resampling.LANCZOS)
-                img.paste(shot, native_size(0, 306))
+                img = place_visual(shot, native_size(0, 306), time)
         if archive_shot:
             frame = min(len(clip) - 1, int(time * len(clip) / archive_duration)) if clip else 0
             source = clip[frame] if clip else photograph
             label = visual_label or (CLIPS[topic["id"]]["label"] if clip else topic["archive"]["label"])
-            shot = camera_shot(source, native_size(WIDTH, 405), time, archive_duration, zoom=.08)
-            shot.paste(base, (0, 0, *shot.size), visual_shade(shot.size))
-            archive_canvas = canvas.copy()
-            archive_canvas.paste(shot, native_size(0, 310))
+            portrait = source.height > source.width
+            size = OUTPUT_SIZE if portrait else native_size(WIDTH, 405)
+            shot = camera_shot(source, size, time, archive_duration, zoom=.08)
+            archive_canvas = place_visual(shot, native_size(0, 310), time, portrait=portrait)
             img = archive_canvas if opacity == 1 else Image.blend(img, archive_canvas, opacity)
             if opacity > .5:
-                draw.text((348, 748), label, font=font(20, True), fill=accent, anchor="mm")
+                credit = label
+        draw = NativeOverlay(img)
+        if not hindi:
+            draw.rounded_rectangle((52, 124, 86 + badge_width, 173), radius=20, fill="#101A2B", outline=accent)
+            draw.text((69, 149), badge, font=badge_font, fill=accent, anchor="lm")
+        if credit:
+            draw.text((348, 748), credit, font=native_font(18, True), fill="#F7F3EA",
+                      anchor="mm", stroke_width=2, stroke_fill="#121827")
         if beat and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
             label = topic["labels"][1]
-            draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 550 else font(20, True),
-                      fill=accent, anchor="mm")
+            draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 825 else native_font(20, True),
+                      fill=accent, anchor="mm", stroke_width=2, stroke_fill="#121827")
             if topic["scene"] == "distance":
-                draw.text((348, 755), "ILLUSTRATION · NOT TO SCALE", font=font(17, True), fill=accent, anchor="mm")
+                draw.text((348, 755), "ILLUSTRATION · NOT TO SCALE", font=native_font(17, True), fill=accent, anchor="mm")
         caption, face = "", takeaway_font
         if recap:
             takeaway = topic["labels"][1]
             if replay:
                 step = bisect_right((1.4, 2.2), diagram_frame / FPS)
                 takeaway = recap_steps[step]
-            caption = wrap(takeaway, face, 526)
+            caption = wrap(takeaway, face, 789)
         if caption:
             if layout in {"space film", "experiment"} and not hindi:
-                draw.rectangle((53, 862, 60, 1039), fill=accent)
+                draw.rectangle((53, 820, 60, 905), fill=accent)
             else:
-                draw.rounded_rectangle((54, 845, 642, 1063), radius=radius, fill=caption_fill, outline=border, width=2)
+                draw.rounded_rectangle((54, 810, 642, 916), radius=radius, fill=caption_fill, outline=border, width=2)
             if not hindi:
-                draw.multiline_text((348, 950), caption, font=face,
+                draw.multiline_text((348, 865), caption, font=face,
                                     fill="#F7F3EA", anchor="mm", align="center", spacing=7)
-        if layout == "magazine":
-            draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill=border)
-            draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
+        if answer_gap == ANSWER_PAUSE and pause_start <= time < reveal:
+            remaining = (reveal - time) / answer_gap
+            draw.rounded_rectangle((172, 922, 548, 929), radius=3, fill="#243348")
+            draw.rectangle((172, 922, 172 + 376 * remaining, 929), fill=accent)
         if reveal <= time < reveal + .9 and not hindi:
             progress = min(1, (time - reveal) / .4)
             span = round(185 * (1 - (1 - progress) ** 3))
@@ -490,11 +521,9 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
                 draw.line((360 - span, 791, 360 + span, 791), fill=accent, width=3)
         if time >= outro:
             progress = min(1, (time - outro) / .35)
-            y = 1090 + round(18 * (1 - progress) ** 3)
+            y = 930 + round(8 * (1 - progress) ** 3)
             draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
-            draw.text((360, y + 30), END_CARD, font=font(27, True), fill="#F7F3EA", anchor="mm")
-        overlay = overlay.resize(OUTPUT_SIZE, Image.Resampling.BILINEAR)
-        img.paste(overlay, (0, 0), overlay)
+            draw.text((360, y + 30), END_CARD, font=native_font(27, True), fill="#F7F3EA", anchor="mm")
         yield img
 
 
@@ -566,7 +595,8 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     clip = footage.decode(ffmpeg, topic["id"], FPS) if use_clip else ()
     if visual:
         if visual["kind"] == "video":
-            clip = footage.decode_frames(ffmpeg, visual["path"], FPS)
+            clip = footage.decode_frames(ffmpeg, visual["path"], FPS,
+                                         portrait=footage.is_portrait(ffmpeg, visual["path"]))
             if not clip:
                 raise ValueError("The selected stock clip could not be decoded.")
         else:
@@ -574,12 +604,13 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     if use_clip and not clip:
         raise ValueError("The reviewed footage did not decode. Check the cached file.")
     diagram = ()
-    if topic["id"] in {"rainbow-split", "venus-spin"} and find_spec("manim") is not None:
-        from manim_diagrams import render_diagram
+    if find_spec("manim") is not None:
+        from manim_diagrams import DIAGRAMS, render_diagram
 
-        diagram = footage.decode_frames(ffmpeg, render_diagram(topic["id"], wav_path.parent, FPS), FPS)
-        if not diagram:
-            raise ValueError("The Manim diagram did not decode.")
+        if topic["id"] in DIAGRAMS:
+            diagram = footage.decode_frames(ffmpeg, render_diagram(topic["id"], wav_path.parent, FPS), FPS)
+            if not diagram:
+                raise ValueError("The Manim diagram did not decode.")
     caption_filter, caption_timing = ass_filter(
         wav_path.parent, topic, spoken_plan(topic, beats), timings, seconds, wav_path)
     shutil.copyfile(wav_path.parent / "captions.ass", destination.with_name("captions.ass"))

@@ -1,6 +1,9 @@
 """CPU-rendered science inserts for the Shorts renderer."""
 
-from manim import Circle, Create, FadeIn, GrowFromEdge, LEFT, Line, Rectangle, Scene, Text, UP, VGroup, tempconfig
+import math
+
+from manim import (Arrow, Circle, Create, Dot, Ellipse, FadeIn, GrowFromEdge, LEFT, Line,
+                   MoveAlongPath, Rectangle, Scene, Text, UP, VGroup, linear, tempconfig)
 
 
 class RainbowDrop(Scene):
@@ -43,7 +46,83 @@ class VenusPeriods(Scene):
         self.wait(1.3)
 
 
-DIAGRAMS = {"rainbow-split": RainbowDrop, "venus-spin": VenusPeriods}
+class MercuryDay(Scene):
+    def construct(self):
+        orbit = Ellipse(width=8.8, height=3.9, color="#7285A6")
+        sun = Circle(.62, color="#FFB75D", fill_opacity=1).shift(LEFT * 1.2)
+        planet = Dot(orbit.get_start(), radius=.16, color="#FFE2AC")
+        title = Text("MERCURY’S SOLAR DAY", font_size=32).move_to((0, 3.2, 0))
+        self.add(title, sun, planet)
+        self.play(Create(orbit), run_time=.4)
+        for number, days in ((1, 88), (2, 176)):
+            label = Text(f"{number} orbit{'s' if number == 2 else ''} · {days} Earth days",
+                         font_size=27, color="#FFE2AC").move_to((0, -2.8, 0))
+            self.play(MoveAlongPath(planet, orbit, rate_func=linear), FadeIn(label), run_time=1.35)
+            if number == 1:
+                self.remove(label)
+        self.wait(.7)
+
+
+class LunarEclipse(Scene):
+    def construct(self):
+        title = Text("LIGHT THROUGH EARTH’S ATMOSPHERE", font_size=27).move_to((0, 3, 0))
+        sun = Circle(.82, color="#FFBE67", fill_opacity=1).move_to((-4.7, 0, 0))
+        earth = Circle(1, color="#70B8F2", fill_color="#254986", fill_opacity=1)
+        moon = Circle(.52, color="#AFBCCF", fill_opacity=1).move_to((4.5, 0, 0))
+        self.add(title, sun, earth, moon)
+        rays = VGroup(*(Line((-3.8, y * 1.35, 0), (-.35, y, 0), color="#FFD281")
+                        for y in (-1, 1)))
+        self.play(Create(rays), run_time=.85)
+        refracted = VGroup(*(Arrow((.35, y, 0), (4, y * .12, 0), buff=0, color="#FC775C")
+                             for y in (-1, 1)))
+        self.play(Create(refracted), moon.animate.set_color("#CB5845"), run_time=1.35)
+        self.play(FadeIn(Text("RED LIGHT REACHES THE MOON", font_size=24, color="#FEB6A4")
+                         .move_to((0, -2.75, 0))), run_time=.6)
+        self.wait(1.1)
+
+
+class SaturnRings(Scene):
+    def construct(self):
+        title = Text("ICE AND ROCK IN ORBIT", font_size=32).move_to((0, 3.15, 0))
+        rings = VGroup(*(Ellipse(width=w, height=h, color=color)
+                         for w, h, color in ((6, 1.45, "#95A9C4"), (8, 2, "#DBC39B"), (10, 2.7, "#95A9C4"))))
+        saturn = Circle(1.12, color="#FFD68B", fill_color="#AE794E", fill_opacity=1)
+        saturn.set_z_index(1)
+        self.add(title, saturn)
+        self.play(Create(rings), run_time=.55)
+        grains = [Dot(ring.get_start(), radius=.10, color=color).set_z_index(2)
+                  for ring, color in zip(rings, ("#E5F7FF", "#CBA688", "#DAF0FF"))]
+        self.add(*grains)
+        self.play(*(MoveAlongPath(grain, ring, rate_func=lambda t, speed=speed: (t * speed) % 1)
+                    for ring, grain, speed in zip(rings, grains, (2, 1.55, 1.15))), run_time=2.7)
+        self.wait(.6)
+
+
+class WhiteDwarf(Scene):
+    def construct(self):
+        title = Text("FORCES INSIDE A WHITE DWARF", font_size=30).move_to((0, 3.1, 0))
+        star = Circle(1.28, color="#D7E7FF", fill_color="#657EB0", fill_opacity=1)
+        inward = VGroup()
+        outward = VGroup()
+        for angle in range(4):
+            theta = (angle + .5) * math.pi / 2
+            dx, dy = math.cos(theta), math.sin(theta)
+            inward.add(Arrow((2.8 * dx, 2.8 * dy, 0), (1.5 * dx, 1.5 * dy, 0),
+                             color="#FFA67A", buff=0))
+            outward.add(Arrow((.25 * dx, .25 * dy, 0), (1.1 * dx, 1.1 * dy, 0),
+                              color="#94E2F6", buff=0))
+        self.add(title)
+        self.play(Create(star), run_time=.65)
+        self.play(Create(inward), FadeIn(Text("Gravity", color="#FFA67A", font_size=25)
+                                         .move_to((-3, -2.65, 0))), run_time=.95)
+        self.play(Create(outward), FadeIn(Text("Electron pressure", color="#94E2F6", font_size=25)
+                                          .move_to((3, -2.65, 0))), run_time=1.05)
+        self.wait(1.05)
+
+
+DIAGRAMS = {"rainbow-split": RainbowDrop, "venus-spin": VenusPeriods, "mercury-day": MercuryDay,
+            "eclipse-red": LunarEclipse, "saturn-rings": SaturnRings,
+            "chandrasekhar-limit-hi": WhiteDwarf}
 
 
 def render_diagram(topic_id, directory, fps):

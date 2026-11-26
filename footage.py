@@ -1,6 +1,7 @@
 """Cache and decode the explicitly reviewed footage catalogue."""
 
 from pathlib import Path
+import re
 import subprocess
 import requests
 from PIL import Image
@@ -35,8 +36,14 @@ def decode(ffmpeg, topic_id, fps):
     return decode_frames(ffmpeg, cache_file(topic_id), fps)
 
 
-def decode_frames(ffmpeg, path, fps):
-    width, height = 1080, 608
+def is_portrait(ffmpeg, path):
+    info = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    size = re.search(r"Video: [^\r\n]*?\b(\d{2,5})x(\d{2,5})\b", info.stderr)
+    return bool(size and int(size[1]) < int(size[2]))
+
+
+def decode_frames(ffmpeg, path, fps, *, portrait=False):
+    width, height = (720, 1280) if portrait else (1080, 608)
     stride = width * height * 3
     frames = []
     with subprocess.Popen(

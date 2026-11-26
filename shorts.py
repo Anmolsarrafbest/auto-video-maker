@@ -89,6 +89,26 @@ def youtube_metadata(topic, trends=None, *, archive_used=False):
     }
 
 
+def pinned_comment(topic):
+    prompts = {
+        "venus-spin": "Which surprised you more about Venus: its slow spin or its shorter year?",
+        "moon-distance": "How would you measure the distance to the Moon from Earth?",
+        "rainbow-split": "What would you like to see next: a double rainbow or how a prism separates light?",
+        "eclipse-red": "What color did the Moon look during the last lunar eclipse you saw?",
+        "saturn-rings": "Which part of Saturn would you explore first: the rings or one of its moons?",
+        "mercury-day": "Which would feel stranger on Mercury: a sunrise or a year?",
+    }
+    categories = {
+        "Space": "Which space fact should we animate next?",
+        "History": "Which moment from science history should we cover next?",
+        "Physics": "What everyday example would you use to explain this?",
+        "Ocean": "Which ocean mystery should we explain next?",
+    }
+    return topic.get("pinned_comment") or prompts.get(
+        topic["id"], categories.get(topic["category"], "What would you like us to explain next?")
+    )
+
+
 def cleaned(text):
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
@@ -364,7 +384,8 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             "format": style, "source": topic["source"],
             "production": direction,
             "archive": topic.get("archive") if archive_path is not None else None,
-            "answer_pause_seconds": pause, "needs_review": bool(episode_plan) or beats != topic["beats"],
+            "answer_pause_seconds": pause, "pinned_comment": pinned_comment(topic),
+            "needs_review": bool(episode_plan or (visual and visual.get("automatic"))) or beats != topic["beats"],
             "made_for_kids": False, "synthetic_media": bool(visual and visual["synthetic"]),
         })
         (scratch / "flow-prompt.txt").write_text(

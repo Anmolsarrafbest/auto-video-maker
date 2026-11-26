@@ -35,7 +35,8 @@ libx264.
   `assets-cache/music/<soundtrack>/`, using the soundtrack names in
   `production.py` such as `ambient synth` and `felt piano`. Keep license and
   attribution records for the tracks you use.
-- If the music cache is empty, the renderer generates a MIDI arrangement and
+- If the music cache is empty, the renderer generates a MIDI arrangement with
+  a drum groove, syncopated bass, and subtle stereo echo, then
   plays it through FluidSynth and `assets-cache/soundfont.sf2`. The
   [GeneralUser GS SoundFont](https://github.com/mrbumpy409/GeneralUser-GS) is a
   free option. Install [FluidSynth](https://github.com/FluidSynth/fluidsynth/releases)
@@ -44,7 +45,8 @@ libx264.
   library. If the SoundFont or runtime is unavailable, narration still renders.
 - Put CC0 `whoosh.wav`, `pop.wav`, and `chime.wav` in `assets-cache/sfx/`.
   The [Starter Sound Kit](https://alfredmakes.com/guides/starter-sound-kit/) has
-  all three. The renderer times them to the reveal and end card. FFmpeg ducks
+  all three. The renderer levels them and cues them at the opening, reveal,
+  and end card. FFmpeg ducks
   the music under the narration and normalizes the mix to a −14 LUFS target.
 
 ### Optional visual sources
@@ -55,11 +57,16 @@ its relevance and license, then run the same command with `--use ID`:
 ```powershell
 python visuals.py venus-spin "Venus atmosphere" --provider nasa
 python visuals.py venus-spin "Venus atmosphere" --provider nasa --use REVIEWED_ID
+python visuals.py venus-spin "Venus atmosphere" --auto
 ```
 
 NASA requires no key. `--provider pexels` and `--provider pixabay` use free API
 keys named `PEXELS_API_KEY` and `PIXABAY_API_KEY` in `.env`. The selected
 asset is cached with its credit and source for offline rendering.
+With `--auto`, the tool searches NASA and any stock providers with keys
+configured, preferring relevant portrait HD assets. Pass `--provider` to
+restrict the search or `--pollinations-fallback` to try a keyless AI image
+if no match can be cached. Review automatically selected visuals before posting.
 To try a keyless generated illustration, use `--provider pollinations --use generate`
 with a descriptive prompt. If that endpoint requires authentication or payment,
 the command exits and the existing cache stays available. Generated visuals are
@@ -247,6 +254,19 @@ python instagram_publish.py publish-next
 ```
 
 Enter the Page token at the hidden prompt. It is saved as `INSTAGRAM_PAGE_ACCESS_TOKEN` in the ignored project `.env` file. The Instagram account ID and username are stored in `secrets/instagram.json`. YouTube OAuth sign-in saves the channel and credentials as `YOUTUBE_TOKEN_JSON` in `.env`. Review the video in the local queue first, then approve it explicitly for Instagram. `publish-next` can publish one approved Reel per India calendar day. It publishes immediately when Meta finishes processing. Start with one manual test, then use Windows Task Scheduler to run `python.exe` with the absolute path to `instagram_publish.py` and argument `publish-next`. Use the project folder for **Start in**. The PC must be on and signed in. If an earlier publish has an uncertain outcome, reconcile it on the Instagram profile before changing the local receipt.
+
+From the repo, register the Instagram task with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-publisher.ps1 -Instagram -At 19:15
+```
+
+Use the YouTube `-Queue` task to publish the same reviewed drafts on both
+platforms. Register separate start times because both commands share a local
+publishing lock. The non-queue YouTube task can generate its own draft and
+publish directly. Add `-Offline` to that task to skip trend lookup during
+generation. Uploads still require the internet. Add `-WhatIf` to preview
+either registration.
 # Optional Manim science diagrams
 
 Install Manim Community to use CPU-rendered animations for the rainbow and Venus Shorts.
@@ -258,5 +278,9 @@ python -m pip install manim==0.22.1
 python shorts.py generate --topic rainbow-split --offline
 ```
 
-The job's `metadata.json` records the diagram renderer. These topics use their
-built-in illustrations when Manim is absent.
+The job's `metadata.json` records the diagram renderer and a suggested
+`pinned_comment` for manual posting. It does not post the comment.
+Manim also animates Mercury's solar day, lunar eclipses, Saturn's rings,
+and the forces in a white dwarf. The white dwarf scene is available for the
+catalogue's Hindi draft when Hindi production resumes. These topics use
+their built-in illustrations when Manim is absent.

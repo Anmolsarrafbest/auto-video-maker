@@ -12,6 +12,16 @@ import wave
 MODEL_DIR = Path(__file__).resolve().parent / "assets-cache" / "whisper-tiny"
 
 
+def topic_badge(topic):
+    headings = {"Space": "SPACE SCIENCE", "History": "SCIENCE HISTORY",
+                "Physics": "EVERYDAY PHYSICS", "Ocean": "OCEAN SCIENCE"}
+    if topic.get("language") == "hi":
+        headings = {"Space": "अंतरिक्ष विज्ञान", "History": "विज्ञान का इतिहास",
+                    "Physics": "रोज़ की भौतिकी", "Ocean": "समुद्री विज्ञान"}
+        return headings.get(topic["category"], "विज्ञान की बातें")
+    return headings.get(topic["category"], "SCIENCE EXPLAINED")
+
+
 def recognized_words(wav, language):
     if not (MODEL_DIR / "model.bin").is_file():
         return []
@@ -87,10 +97,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Header,{font_name},28,&H00FFE3CB,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,58,80,130,1
-Style: Title,{font_name},47,&H00F2F5F7,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,7,55,75,175,1
+Style: Header,{font_name},25,&H00FFE3CB,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,7,58,80,130,1
 Style: Label,{font_name},25,&H00FFE3CB,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,2,75,95,540,1
-Style: Caption,{font_name},40,&H00F2F5F7,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,2.8,1,2,72,72,305,1
+Style: Caption,{font_name},40,&H00F2F5F7,&H00FFFFFF,&H001B1511,&H00000000,-1,0,0,0,100,100,0,0,1,2.8,1,2,72,94,370,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -102,10 +111,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def line(start, end, style, text):
         return f"Dialogue: 0,{timestamp(start)},{timestamp(end)},{style},,0,0,0,,{text}\n"
 
-    heading = {"Space": "अंतरिक्ष", "History": "इतिहास", "Physics": "भौतिकी", "Ocean": "समुद्र"}
     if hindi:
-        script += line(0, seconds, "Header", heading.get(topic["category"], "विज्ञान"))
-        script += line(0, seconds, "Title", escape(plan[0][1]))
+        script += line(0, seconds, "Header", escape(topic_badge(topic)))
         first_answer = next(start for (start, _), (role, _, _) in zip(timings, plan) if role == "answer")
         script += line(first_answer, seconds, "Label", escape(topic["labels"][1]))
     detected = recognized_words(wav, topic.get("language", "en"))
