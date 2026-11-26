@@ -30,9 +30,9 @@ CLIPS = {
     },
 }
 EPISODES = {
-    "moon-distance": (20, "space film", "Look across the lit lunar surface",
-                      "Pull back from the Moon and reveal the Earth–Moon separation",
-                      "Show a widening gap with a fixed reference line. Mark the diagram as not to scale."),
+    "moon-distance": (20, "space film", "Establish the lunar surface while the narrator introduces the Apollo reflectors",
+                      "Explain the round-trip laser measurement with a clearly labeled diagram",
+                      "Show the widening gap with a fixed reference line. Mark the diagram as not to scale."),
     "mars-sunset": (12, "space film", "Open low over the Martian horizon",
                     "Push toward the setting Sun as the blue halo emerges",
                     "Hold the blue light close to the Sun and keep the surrounding terrain rusty."),
@@ -46,6 +46,8 @@ EPISODES = {
 
 
 def episode(topic):
+    if "discovery" in topic:
+        return (15, "documentary", *topic["discovery"]["shots"])
     style = topic.get("format", "quiz")
     default = {"story": (20, "documentary"), "demo": (18, "experiment"),
                "myth": (12, "experiment"), "quiz": (12, "magazine")}[style]

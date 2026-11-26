@@ -1,0 +1,16 @@
+{
+  "request_id": "2026-11-26-neptune-winds",
+  "title": "Neptune's supersonic winds",
+  "category": "Space",
+  "duration_seconds": 18,
+  "hook": "Neptune has winds faster than the speed of sound on Earth.",
+  "explanation": "Voyager watched clouds streak around the planet. Neptune's winds can reach more than twelve hundred miles per hour.",
+  "opening_label": "Neptune's wind",
+  "payoff_label": "Over 1,200 mph",
+  "source": "https://science.nasa.gov/neptune/",
+  "shots": [
+    "Open on a labeled illustration of Neptune as a bright cloud band sweeps across.",
+    "Follow the cloud features with a small motion trace to show how fast they travel.",
+    "Pull back to Neptune and hold the wind-speed comparison for the payoff."
+  ]
+}

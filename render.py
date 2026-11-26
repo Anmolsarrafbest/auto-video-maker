@@ -58,8 +58,9 @@ def spoken_plan(topic, beats):
         style in {"quiz", "myth"} and random.Random(topic.get("id", "") + ":hook").random() < .4
     )
     episode_plan = topic.get("episode_plan")
-    plan = [] if natural and not episode_plan else [("hook", beats[0], .14)]
-    question = episode_plan["opening"] == "question" if episode_plan else style == "quiz" and not natural
+    opening = episode_plan["opening"] if episode_plan else topic.get("opening")
+    plan = [] if natural and not opening else [("hook", beats[0], .14)]
+    question = opening == "question" if opening else style == "quiz" and not natural
     if question:
         plan.append(("pause", think_line(topic), .18))
     parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+|(?<=।)\s+", beats[1])
@@ -67,7 +68,7 @@ def spoken_plan(topic, beats):
     if len(parts) > 1 and len(parts[0].split()) < 4:
         parts[:2] = [" ".join(parts[:2])]
     reveal_gap = ANSWER_PAUSE if question else .25
-    return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
+    return plan + [("answer", text, reveal_gap if i == 0 else .17) for i, text in enumerate(parts)]
 
 
 def font(size, bold=False, serif=False):
@@ -108,6 +109,27 @@ def ease_cubic(value):
     return 4 * value ** 3 if value < .5 else 1 - (-2 * value + 2) ** 3 / 2
 
 
+@lru_cache(maxsize=8)
+def _radial_canvas(size, color):
+    import numpy as np
+
+    width, height = size
+    rgb = ImageColor.getrgb(color) if isinstance(color, str) else color
+    y = np.linspace(-1.0, 1.0, height, dtype=np.float32)[:, None]
+    x = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :]
+    glow = np.clip(1.0 - np.hypot(x * 0.9, (y + 0.08) * 1.1), 0.0, 1.0) ** 1.6
+    lift = np.array([18.0, 22.0, 30.0], dtype=np.float32)
+    pixels = np.clip(np.array(rgb, dtype=np.float32) + glow[..., None] * lift, 0, 255).astype(np.uint8)
+    return Image.fromarray(pixels, mode="RGB")
+
+
+@lru_cache(maxsize=8)
+def _rounded_mask(size, radius=32):
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
+    return mask
+
+
 class SupersampledShapes:
     """Scale the existing illustration coordinates onto an antialiased art plane."""
 
@@ -115,7 +137,7 @@ class SupersampledShapes:
     top = 280
 
     def __init__(self, color):
-        self.image = Image.new("RGB", (WIDTH * self.scale, 520 * self.scale), color)
+        self.image = _radial_canvas((WIDTH * self.scale, 520 * self.scale), color).copy()
         self.draw = ImageDraw.Draw(self.image)
 
     def points(self, coords):
@@ -202,13 +224,13 @@ def place_visual(shot, position, time, *, portrait=False):
         img = camera_shot(shot, OUTPUT_SIZE, 1, 1, zoom=punch) if punch else shot
         img.paste((8, 12, 23), (0, 0, *OUTPUT_SIZE), visual_shade(OUTPUT_SIZE))
         return img
-    small = ImageOps.fit(shot, (135, 240), Image.Resampling.BILINEAR)
-    blur = small.filter(ImageFilter.GaussianBlur(15))
-    backdrop = Image.blend(blur, Image.new("RGB", blur.size, (8, 12, 23)), .69)
+    small = ImageOps.fit(shot, (270, 480), Image.Resampling.BILINEAR)
+    blur = small.filter(ImageFilter.GaussianBlur(18))
+    backdrop = Image.blend(blur, Image.new("RGB", blur.size, (8, 12, 23)), .55)
     img = backdrop.resize(OUTPUT_SIZE, Image.Resampling.BILINEAR)
     if punch:
         shot = camera_shot(shot, shot.size, 1, 1, zoom=punch)
-    img.paste(shot, position)
+    img.paste(shot, position, _rounded_mask(shot.size))
     return img
 
 
@@ -235,7 +257,14 @@ def lunar_sphere(phase):
 def illustration(draw, scene, accent, time, beat):
     x, y = 348, 542
     muted = "#33496C"
-    if scene == "orbit":
+    if scene == "discovery":
+        reach = 90 + 135 * ease_cubic((time % 4) / 3)
+        for offset in (-2, -1, 0, 1, 2):
+            row = y + offset * 29
+            draw.line((x - reach, row, x + reach, row), fill=muted, width=2)
+        circle(draw, x, y, 96, "#152C43", accent, 3)
+        circle(draw, x, y, 74 + 8 * math.sin(time * 2), outline=accent, width=2)
+    elif scene == "orbit":
         draw.ellipse((121, y - 105, 575, y + 105), outline=muted, width=3)
         circle(draw, x, y, 56, "#FFB65C")
         circle(draw, x - 12, y - 14, 24, "#FFD98C")
@@ -433,12 +462,9 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
             if replay:
                 diagram_frame = round(replay_progress * (len(diagram) - 1))
-            shot = diagram[diagram_frame]
-            drift = min(1, max(0, (time - reveal) / max(1, seconds - reveal)))
-            width = WIDTH + round(32 * drift)
-            height = round(456 * width / WIDTH)
-            shot = shot.resize(native_size(width, height), Image.Resampling.BICUBIC)
-            img = place_visual(shot, native_size((WIDTH - width) / 2, 300 - (height - 456) / 2), time)
+            shot = camera_shot(diagram[diagram_frame], native_size(WIDTH, 456),
+                               time - reveal, max(1, seconds - reveal), zoom=.07)
+            img = place_visual(shot, native_size(0, 300), time)
         elif opacity < 1:
             if layout in {"space film", "experiment"}:
                 stage = SupersampledShapes(base)
@@ -480,7 +506,11 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         if credit:
             draw.text((348, 748), credit, font=native_font(18, True), fill="#F7F3EA",
                       anchor="mm", stroke_width=2, stroke_fill="#121827")
-        if beat and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
+        if topic["scene"] == "discovery":
+            stage_label = topic["labels"][int(bool(beat))]
+            draw.multiline_text((360, 535), wrap(stage_label, label_font, 480), font=label_font,
+                                anchor="mm", align="center", fill="#F7F3EA")
+        if beat and topic["scene"] != "discovery" and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 825 else native_font(20, True),
                       fill=accent, anchor="mm", stroke_width=2, stroke_fill="#121827")
@@ -527,14 +557,33 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         yield img
 
 
+def _trim_pcm_silence(pcm, rate, threshold=320, pad_ms=45):
+    import numpy as np
+
+    samples = np.frombuffer(pcm, dtype="<i2")
+    active = np.flatnonzero(np.abs(samples.astype(np.int32)) > threshold)
+    if active.size == 0:
+        return pcm
+    pad = round(rate * pad_ms / 1000)
+    start = max(0, int(active[0]) - pad)
+    end = min(len(samples), int(active[-1]) + 1 + pad)
+    return samples[start:end].tobytes()
+
+
 def narration(beats, seconds, voice_path, destination, *, topic=None):
     topic = topic or {}
     plan = spoken_plan(topic, beats)
     gaps = [gap for _, _, gap in plan]
     direction = treatment(topic)
     speed, expression, rhythm = DELIVERY[direction["delivery"]]
+    kokoro_voice = direction.get("kokoro_voice")
     def fit_narration():
-        if direction["voice"] not in {HINDI, INDIAN_ENGLISH}:
+        if kokoro_voice:
+            from local_voices import kokoro_pcm, load_kokoro
+
+            kokoro_dir = voice_path.parent / "kokoro"
+            voice = load_kokoro(kokoro_dir)
+        elif direction["voice"] not in {HINDI, INDIAN_ENGLISH}:
             from piper import PiperVoice, SynthesisConfig
 
             if not voice_path.is_file():
@@ -553,12 +602,16 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
                     return wav.getframerate(), wav.readframes(wav.getnframes())
             if direction["voice"] == INDIAN_ENGLISH:
                 return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
-            if role == "hook":
-                length *= .96
-            config = SynthesisConfig(length_scale=length, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
-                                     volume=.90 if role == "pause" else 1)
+            length *= {"hook": 1.02, "pause": 1.04, "answer": 1}[role]
+            if kokoro_voice:
+                rate, pcm = kokoro_pcm(voice, line, kokoro_voice, min(1.45, 1 / length), kokoro_dir)
+                return rate, _trim_pcm_silence(pcm, rate)
+            config = SynthesisConfig(length_scale=length, noise_scale=expression, noise_w_scale=rhythm,
+                                     volume=.89 if role == "pause" else 1)
             chunks = voice.synthesize(line, syn_config=config)
-            return voice.config.sample_rate, b"".join(chunk.audio_int16_bytes for chunk in chunks)
+            rate = voice.config.sample_rate
+            pcm = b"".join(chunk.audio_int16_bytes for chunk in chunks)
+            return rate, _trim_pcm_silence(pcm, rate)
 
         for pace in ((1,) if direction["voice"] == HINDI else (1, .92, .84, .76)):
             rates, clips = zip(*(synthesize(i, role, line, pace)

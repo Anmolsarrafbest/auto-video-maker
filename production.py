@@ -1,11 +1,14 @@
 """Editorial choices and voice credits for each Short."""
 
+from local_secrets import secret
+
 VOICE = "en_US-hifi_tts_92-medium"
 VOICE_SNAPSHOT = "5ec43b186ef915a195d3ddbcfd9916e76c503c3f"
 ALBA = "en_GB-alba-medium"
 JOE = "en_US-joe-medium"
 INDIAN_ENGLISH = "Microsoft Heera"
 HINDI = "Recorded Hindi narration"
+KOKORO = "Kokoro ONNX"
 ATTRIBUTION = (
     "Narration synthesized with Piper en_US-hifi_tts_92-medium, trained on the voice of "
     "Cori Samuel (Hi-Fi TTS reader 92), CC BY 4.0. The audio is synthesized. "
@@ -84,6 +87,11 @@ def treatment(topic):
     }
     if language != "en":
         result["language"] = language
+    kokoro_voice = secret("SHORTS_KOKORO_VOICE").strip()
+    if language == "en" and kokoro_voice:
+        if kokoro_voice == "auto":
+            kokoro_voice = {VOICE: "af_heart", ALBA: "bf_emma", JOE: "am_michael"}[voice]
+        result.update(voice=KOKORO, kokoro_voice=kokoro_voice)
     return result
 
 
@@ -91,5 +99,6 @@ def voice_credit(voice):
     extra = {
         INDIAN_ENGLISH: "Narration synthesized locally with Microsoft Heera, Windows English (India).",
         HINDI: "हिंदी वाचन इस वीडियो के लिए रिकॉर्ड किया गया है।",
+        KOKORO: "Narration synthesized locally with Kokoro-82M. https://huggingface.co/hexgrad/Kokoro-82M",
     }
     return extra[voice] if voice in extra else VOICE_CREDITS[voice]

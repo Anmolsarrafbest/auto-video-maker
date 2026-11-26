@@ -71,7 +71,8 @@
     "id": "venus-spin", "category": "Space", "scene": "orbit", "color": "#FFBB73",
     "title": "Venus spins slower than it orbits", "labels": ["243 EARTH DAYS TO SPIN", "225 EARTH DAYS TO ORBIT"],
     "aliases": ["venus", "planet venus", "venus rotation"],
-    "beats": ["Can a spin outlast a year?", "On Venus, one spin takes two hundred forty-three Earth days. Its year takes just two hundred twenty-five."],
+    "opening": "statement",
+    "beats": ["Venus can finish a year before it finishes one spin.", "One trip around the Sun takes two hundred twenty-five Earth days. That spin takes two hundred forty-three."],
     "source": "https://science.nasa.gov/venus/venus-facts/"
   },
   {
@@ -92,7 +93,7 @@
     "id": "rainbow-split", "category": "Physics", "format": "demo", "scene": "rainbow", "color": "#FFBE86",
     "title": "How one raindrop splits sunlight", "labels": ["LIGHT ENTERS A DROP", "COLORS LEAVE AT DIFFERENT ANGLES"],
     "aliases": ["rainbow", "raindrop", "rainbows"],
-    "beats": ["Follow sunlight into a single raindrop.", "The light bends as it enters the drop, then reflects inside. Each color leaves at a slightly different angle."],
+    "beats": ["A whole rainbow starts with one tiny drop.", "Watch what happens to the sunlight. It bends on the way in, bounces once inside, and comes out as a fan of colors."],
     "source": "https://www.usgs.gov/water-science-school/science/rainbows-water-and-light"
   },
   {
@@ -113,8 +114,10 @@
     "id": "moon-distance", "category": "Space", "scene": "distance", "color": "#C8C4F8",
     "title": "The Moon is slowly drifting away", "labels": ["EARTH AND MOON", "THE DISTANCE IS GROWING"],
     "aliases": ["moon distance", "moon moving away", "lunar distance"],
-    "beats": ["Is the Moon moving away from Earth?", "Yes. The Moon moves about one and a half inches farther away every year. You would never notice that over one night. The diagram exaggerates the change so you can see what moving away means."],
-    "source": "https://science.nasa.gov/moon/eclipses/"
+    "opening": "statement",
+    "beats": ["Astronauts left mirrors on the Moon.", "We still bounce lasers off them to measure the distance. Turns out the Moon is drifting away about as fast as your fingernails grow."],
+    "writing_facts": ["Apollo astronauts left laser reflectors on the Moon.", "Scientists measure the time it takes light to make the round trip.", "The Moon recedes about 3.8 centimeters (1.5 inches) every year, roughly as fast as fingernails grow."],
+    "source": "https://www.nasa.gov/missions/lro/laser-beams-reflected-between-earth-and-moon-boost-science/"
   },
   {
     "id": "saturn-rings", "category": "Space", "scene": "rings", "color": "#F2D09A",

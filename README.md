@@ -2,6 +2,23 @@
 
 ## CPU video, captions, and audio setup
 
+### Optional Kokoro narration
+
+Kokoro synthesizes English narration locally on CPU. Install the optional
+engine and cache the model once:
+
+```powershell
+python -m pip install "kokoro-onnx>=0.4.7,<1"
+python shorts.py setup-kokoro
+$env:SHORTS_KOKORO_VOICE = 'auto'
+python shorts.py generate --topic moon-distance --seconds 15 --offline
+```
+
+Set `SHORTS_KOKORO_VOICE=auto` in `.env` to use a rotating set of stock voices
+for English drafts, or select a voice such as `af_heart`. Clear the setting
+to use Piper. Existing regional voice settings take precedence for non-default
+English editions. Narration and captions use the same script and timing plan.
+
 The renderer exports 1080×1920 H.264 with stereo AAC (192 kbps target). Set these
 in the ignored project `.env`:
 
@@ -74,6 +91,56 @@ credited and flagged in upload metadata. The default offline render uses the
 cached asset or a diagram without calling any visual API.
 
 ## How the Shorts pipeline works
+
+To discover a new science or science-history Short with Gemini, run
+`python shorts.py generate --discover --seconds 15`. This uses the configured
+Gemini key and recent trend titles from India and the US, avoids previous
+titles, and writes a dialogue script and three-shot Flow prompt. The local
+renderer uses Kokoro or Piper and animated graphics. Review the draft and
+check the cited article before publishing. Add `--offline` to skip Trends
+and ask for an evergreen idea. Discovery still calls Gemini and checks the
+suggested source online.
+
+For five discovery drafts, run `python shorts.py generate --discover --count 5`.
+The app chooses five distinct lengths from 15 to 25 seconds before requesting
+the scripts and includes earlier batch titles in its duplicate check.
+
+### Spark JSON intake on GitHub
+
+The `spark-render.yml` workflow accepts one idea per GitHub Actions dispatch.
+After the workflow is on `main`, callers send an authenticated
+`POST /repos/Anmolsarrafbest/auto-video-maker/actions/workflows/spark-render.yml/dispatches`
+to `api.github.com`. Use `{"ref":"main","inputs":{"idea_json":"<serialized idea>"}}`.
+See [spark-example.json](spark-example.json) for the inner JSON. The endpoint
+requires a repository-scoped fine-grained token with **Actions: write**.
+Keep that token in the caller's credential store.
+
+Set the repository Actions variable `SPARK_RENDER_ENABLED=true` after checking
+your included compute and configuring a hard spending stop. The default run creates a private
+GitHub Actions draft artifact with one-day retention. To enable publishing, set
+`SPARK_PUBLISH_MODE` to `youtube`, `instagram`, or `both`. Configure
+`SPARK_YOUTUBE_CHANNEL_ID` and/or `SPARK_INSTAGRAM_ACCOUNT_ID` plus
+`SPARK_INSTAGRAM_USERNAME` as Actions variables, and set the corresponding
+`YOUTUBE_TOKEN_JSON` or `INSTAGRAM_PAGE_ACCESS_TOKEN` as Actions secrets.
+The cloud runner uses CPU-only Kokoro. Without cached music or a SoundFont,
+the render uses narration audio. Credentials stay in Actions secrets.
+
+```powershell
+python spark_job.py --mode validate --input spark-example.json
+$request = @{ ref = 'main'; inputs = @{ idea_json = (Get-Content .\spark-example.json -Raw) } } |
+    ConvertTo-Json -Depth 4 -Compress
+$request | gh api --method POST repos/Anmolsarrafbest/auto-video-maker/actions/workflows/spark-render.yml/dispatches --input -
+```
+
+Give each idea a unique `request_id` and reuse the same ID for any retry. Before
+publishing, the worker reserves the ID with a repository tag to prevent duplicate
+uploads. If publication fails after a reservation, check both platforms before
+any manual retry. The intake validates the category and source host and checks
+that the article opens. Verify the scientific claim before enabling public
+publishing. Google documents Spark custom external apps as MCP connections
+with regional and write-confirmation requirements.
+[Spark custom app requirements](https://support.google.com/gemini/answer/17209137?hl=en)
+[GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 
 ```mermaid
 flowchart TD
