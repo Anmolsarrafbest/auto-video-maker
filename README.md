@@ -1,0 +1,84 @@
+# Auto Video Maker
+
+Generate 12-, 15-, or 20-second vertical science Shorts with original animated illustrations, Piper narration, and captions. Draft generation works without a Gemini key or a YouTube account. Uploading uses the free YouTube Data API after you connect your channel.
+
+Each new Short opens with a spoken question, says “Think about it,” then waits 1.5 seconds before revealing the answer. An original instrumental groove with chords, bass, and light percussion comes forward in the pause. The Flow prompt asks for the same timing and music.
+
+## Run locally on Windows
+
+From this folder in PowerShell, using Python 3.11 or newer on 64-bit Windows:
+
+```powershell
+python -m pip install --target .deps -r requirements.txt
+python shorts.py setup-voice
+python shorts.py generate --topic venus-spin --seconds 12 --offline
+```
+
+The first two commands download open-source dependencies and Piper's English voice. The Python package supplies FFmpeg. `setup-voice` also saves the model card, and video descriptions include voice attribution.
+
+Open the printed `short.mp4` path. The same folder contains `preview.png`, `metadata.json`, and `flow-prompt.txt`. The Flow prompt is optional and can be pasted into Google Flow manually.
+
+```powershell
+python shorts.py generate --seconds 15 --region IN
+python shorts.py daily --count 2 --seconds 12 --region IN
+```
+
+`generate` tries Google Trends and renders one draft. `daily` creates dated slots in India time by default. Re-running it on the same date reuses the existing slots. The worker only picks exact matches from its sourced science, space, and ocean topic library. Without an eligible match, it picks an unused evergreen topic. Add fresh entries to [topics.json](topics.json) when the library runs out. Each entry needs a unique ID, factual source, two short narration beats, two labels, and one of the existing scene names. Political and religious topics should stay outside the library.
+
+## Optional Gemini drafts
+
+Use this only if you have a separate Gemini API key from a project on the free tier with billing disabled. Your Jio Google AI Pro chat and Flow access work independently of the API.
+
+Set `GEMINI_FREE_API_KEY` in your shell, then run:
+
+```powershell
+python shorts.py generate --topic saturn-rings --seconds 15 --gemini
+```
+
+Gemini rewrites the narration using the sourced fact supplied by the app. Review the result before upload. Daily jobs use the curated scripts and need no Gemini key. [Gemini API pricing](https://aistudio.google.com/docs/pricing#gemini-3.5-flash-lite)
+
+## Connect YouTube and test a private upload
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **YouTube Data API v3**. This uses an API project for authentication, with no Cloud Run deployment, VM, paid model, or billing setup needed for this app.
+2. Configure the OAuth consent screen. For external Testing, add the Google account that owns the channel as a test user. Create a **Desktop app** OAuth client and download its JSON.
+3. Run `python shorts.py connect-youtube --client "C:\path\to\downloaded-client.json"` with the actual downloaded file path, and sign in to the intended channel. You can also save the file as `secrets/youtube-client.json` and omit `--client`. Copy the channel ID shown in the terminal. Tokens stay in `secrets/`.
+4. Review the draft and its metadata, including the audience and synthetic content settings. Use the printed output folder name in the example below.
+
+```powershell
+python shorts.py upload 'venus-spin-REPLACE_WITH_ACTUAL_SUFFIX' --visibility private
+```
+
+For a Gemini draft, add `--reviewed` after checking its facts and narration. Uploads default to private. If an upload is interrupted, rerun with the same job, visibility, and metadata. The app saves the resumable session and then the YouTube video ID. If a session expires, check YouTube Studio before clearing the local record. A private test job stays associated with that upload. You can change its visibility directly in Studio.
+
+External OAuth consent screens in Testing issue refresh tokens that usually expire in seven days. For recurring use, switch the app to In production as appropriate for your account and Google’s OAuth requirements, then reconnect. See [Google OAuth refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration).
+
+## Run on a schedule
+
+Each upload includes a question headline, a short explanation, a source link, and topic-specific tags and hashtags. For every new draft, the app checks Google Trends in the U.S. and India, plus the selected region if different. It adds a trend to the description only when it matches a vetted alias for that topic. The standard hashtags are used when there are no matches, a feed is unavailable, or you pass `--offline`. Review or edit the draft's `metadata.json` before starting its upload.
+
+After connecting the channel, register the daily Windows task from PowerShell. The first example uses private visibility. After verifying a private upload in YouTube Studio, run the second command to switch the schedule to public:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-publisher.ps1 -At 18:30 -Count 1 -Seconds 15
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-publisher.ps1 -At 18:30 -Count 1 -Seconds 15 -Visibility public
+```
+
+The second registration replaces the first schedule. The PC needs to be on with your Windows user signed in. Use `-Count 2` to upload two videos in the same daily run. Use `-WhatIf` to preview the schedule, or disable **Auto Video Maker - YouTube Shorts** in Task Scheduler to pause future runs. If you already ran today's slots privately, the public schedule applies to new slots. You can change a private video's visibility directly in YouTube Studio.
+
+To run the daily publisher manually:
+
+```powershell
+python shorts.py daily --count 1 --seconds 12 --upload public --channel-id 'UC_REPLACE_WITH_YOUR_CHANNEL_ID'
+```
+
+Use `--count 2` for two slots per run. Keep `--upload private` for continued private testing or omit `--upload` for local drafts. Review the applicable defaults in each draft’s `metadata.json`. The standard renderer produces stylized illustrations for a general audience.
+
+If an upload fails, rerun the task on the same day, or resume an older job explicitly with `upload`.
+
+The project is local. Credentials, generated videos, voice files, and upload records are ignored by Git. Keep those files on the same machine so daily counts, the used-topic history, and upload resumption survive restarts.
+
+## Five-Short cloud pilot
+
+The private GitHub repository's **Five-Short cloud pilot** workflow tests the uploader on a hosted Linux runner. It is specific to the Skill_issue channel and uses the repository Actions secret `YOUTUBE_TOKEN_JSON`. The Git history contains only pilot topic IDs, dates, and public video IDs. Keep the secret out of source control.
+
+An on-demand run starts the pilot. The schedule runs at about 6:37 p.m. India time, uploads at most two public Shorts per India calendar day, and disables itself after five. See `pilot-progress.json` in the repository for completed uploads. A reservation with no video ID stops further uploads until the channel owner checks YouTube Studio and reconciles the record. This protects against a second upload after a runner interruption.

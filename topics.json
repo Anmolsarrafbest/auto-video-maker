@@ -1,0 +1,93 @@
+[
+  {
+    "id": "coral-animals", "category": "Ocean", "scene": "coral", "color": "#FF9B8D",
+    "title": "Corals are animals", "labels": ["CORALS ARE ANIMALS", "TINY POLYPS BUILD THE REEF"],
+    "aliases": ["coral", "coral reef", "coral reefs", "coral polyps"],
+    "beats": ["Is coral a plant or an animal?", "Corals are animals. A stony coral colony is made of tiny polyps that build hard skeletons beneath them."],
+    "source": "https://oceanservice.noaa.gov/facts/coral.html"
+  },
+  {
+    "id": "venus-spin", "category": "Space", "scene": "orbit", "color": "#FFBB73",
+    "title": "Venus spins slower than it orbits", "labels": ["243 EARTH DAYS TO SPIN", "225 EARTH DAYS TO ORBIT"],
+    "aliases": ["venus", "planet venus", "venus rotation"],
+    "beats": ["Can a spin outlast a year?", "On Venus, one spin takes two hundred forty-three Earth days. Its year takes just two hundred twenty-five."],
+    "source": "https://science.nasa.gov/venus/venus-facts/"
+  },
+  {
+    "id": "eclipse-red", "category": "Space", "scene": "eclipse", "color": "#FF927C",
+    "title": "Why the Moon turns red", "labels": ["EARTH BLOCKS DIRECT SUNLIGHT", "RED LIGHT REACHES THE MOON"],
+    "aliases": ["lunar eclipse", "blood moon", "total lunar eclipse"],
+    "beats": ["Why does the Moon turn red?", "During a lunar eclipse, Earth's atmosphere filters sunlight and bends reddish light toward the Moon."],
+    "source": "https://science.nasa.gov/moon/eclipses/"
+  },
+  {
+    "id": "octopus-hearts", "category": "Ocean", "scene": "hearts", "color": "#6FE2D0",
+    "title": "An octopus has three hearts", "labels": ["TWO PUMP TO THE GILLS", "ONE PUMPS TO THE BODY"],
+    "aliases": ["octopus", "octopuses", "cephalopod"],
+    "beats": ["Why does an octopus have three hearts?", "Two pump blood to the gills to pick up oxygen. The third pumps it to the rest of the body."],
+    "source": "https://ocean.si.edu/ocean-life/invertebrates/octopuses-squids-and-relatives"
+  },
+  {
+    "id": "rainbow-split", "category": "Physics", "scene": "rainbow", "color": "#FFBE86",
+    "title": "How one raindrop splits sunlight", "labels": ["LIGHT ENTERS A DROP", "COLORS LEAVE AT DIFFERENT ANGLES"],
+    "aliases": ["rainbow", "raindrop", "rainbows"],
+    "beats": ["How does a raindrop make a rainbow?", "Sunlight bends into the drop, reflects inside, then exits at different angles for different colors."],
+    "source": "https://www.usgs.gov/water-science-school/science/rainbows-water-and-light"
+  },
+  {
+    "id": "sky-blue", "category": "Physics", "scene": "scatter", "color": "#79BEFF",
+    "title": "Why a clear sky looks blue", "labels": ["SUNLIGHT ENTERS THE ATMOSPHERE", "BLUE SCATTERS MORE THAN RED"],
+    "aliases": ["blue sky", "rayleigh scattering", "sky blue"],
+    "beats": ["Why does a clear sky look blue?", "Air molecules scatter blue light more than red, sending blue light toward you from across the sky."],
+    "source": "https://science.nasa.gov/ems/03_behaviors/"
+  },
+  {
+    "id": "double-rainbow", "category": "Physics", "scene": "double", "color": "#CCACFF",
+    "title": "A second rainbow flips the colors", "labels": ["TWO INTERNAL REFLECTIONS", "THE OUTER BOW REVERSES COLOR"],
+    "aliases": ["double rainbow", "secondary rainbow"],
+    "beats": ["Why does a double rainbow reverse colors?", "Light in the outer bow reflects twice inside raindrops, which reverses the order of the colors."],
+    "source": "https://www.usgs.gov/water-science-school/science/rainbows-water-and-light"
+  },
+  {
+    "id": "moon-distance", "category": "Space", "scene": "distance", "color": "#C8C4F8",
+    "title": "The Moon is slowly drifting away", "labels": ["EARTH AND MOON", "THE DISTANCE IS GROWING"],
+    "aliases": ["moon distance", "moon moving away", "lunar distance"],
+    "beats": ["Is the Moon moving away from Earth?", "Yes. The Moon moves about one and a half inches farther away every year."],
+    "source": "https://science.nasa.gov/moon/eclipses/"
+  },
+  {
+    "id": "saturn-rings", "category": "Space", "scene": "rings", "color": "#F2D09A",
+    "title": "What are Saturn’s rings made of?", "labels": ["ICE AND ROCK", "PIECES ORBIT AT DIFFERENT SPEEDS"],
+    "aliases": ["saturn", "saturn rings", "rings of saturn"],
+    "beats": ["What are Saturn's rings made of?", "They're billions of pieces of ice and rock, moving around Saturn at different speeds."],
+    "source": "https://science.nasa.gov/saturn/facts/"
+  },
+  {
+    "id": "mercury-day", "category": "Space", "scene": "orbit", "color": "#F2BE9E",
+    "title": "Mercury goes around the Sun twice in a day", "labels": ["88 EARTH DAYS TO ORBIT", "176 EARTH DAYS FROM SUNRISE TO SUNRISE"],
+    "aliases": ["mercury solar day", "planet mercury", "mercury orbit"],
+    "beats": ["How long is a day on Mercury?", "From sunrise to sunrise takes about one hundred seventy-six Earth days, twice as long as Mercury's orbit."],
+    "source": "https://science.nasa.gov/mercury/facts/"
+  },
+  {
+    "id": "jupiter-spin", "category": "Space", "scene": "tilt", "color": "#E3AD8C",
+    "title": "Jupiter has the shortest day", "labels": ["THE LARGEST PLANET", "A SPIN TAKES ABOUT TEN HOURS"],
+    "aliases": ["jupiter rotation", "jupiter day", "jupiter planet"],
+    "beats": ["Which planet has the shortest day?", "Jupiter. Despite its enormous size, it spins all the way around in just under ten hours."],
+    "source": "https://science.nasa.gov/jupiter/jupiter-facts/"
+  },
+  {
+    "id": "uranus-tilt", "category": "Space", "scene": "sideways", "color": "#8CE3F2",
+    "title": "Uranus spins on its side", "labels": ["A TILT OF ABOUT 98 DEGREES", "ONE POLE FACES THE SUN FOR DECADES"],
+    "aliases": ["planet uranus", "uranus tilt", "uranus rotation"],
+    "beats": ["Which planet spins on its side?", "Uranus. Its axis is tilted about ninety-eight degrees, so each pole can face the Sun for decades."],
+    "source": "https://science.nasa.gov/uranus/facts/"
+  },
+  {
+    "id": "mars-sunset", "category": "Space", "scene": "sunset", "color": "#9BCDFF",
+    "title": "Sunsets on Mars can glow blue", "labels": ["A DUSTY MARTIAN SKY", "BLUE GLOW NEAR THE SUN"],
+    "aliases": ["mars sunset", "blue sunset on mars", "martian sunset"],
+    "beats": ["Why can sunsets on Mars glow blue?", "Fine dust in the Martian atmosphere makes the blue light near the setting Sun stand out."],
+    "source": "https://science.nasa.gov/solar-system/planets/mars/what-does-a-sunrise-sunset-look-like-on-mars/"
+  }
+]

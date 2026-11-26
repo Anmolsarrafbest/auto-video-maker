@@ -1,0 +1,7 @@
+Pillow>=11,<14
+imageio-ffmpeg>=0.6,<1
+piper-tts>=1.5,<2
+google-auth-oauthlib>=1.2,<2
+requests>=2.32,<3
+tzdata
+filelock>=3.20,<4
