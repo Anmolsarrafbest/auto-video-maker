@@ -10,7 +10,6 @@ import random
 import sys
 import tempfile
 import uuid
-from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
@@ -311,7 +310,8 @@ def discover_topic(seconds, trends, previous_titles):
         f"at most {max(14, int(seconds * 2.1))} total words for hook and explanation. "
         "Use simple spoken punctuation and spell out numbers. Supply two short labels (each <= 38 characters) "
         "and three distinct shot descriptions with concrete composition and motion. "
-        "Use a direct public source article from NASA, USGS, NOAA, or Smithsonian that supports the exact claim. "
+        "Use a direct public source that supports the exact claim, such as an archive, museum, university, "
+        "or research paper appropriate to this particular subject. "
         "Do not invent footage or a source. Return only the requested fields.\n" + json.dumps(context)
     )
     response = requests.post(GEMINI_ENDPOINT, headers={"x-goog-api-key": key}, timeout=40,
@@ -338,15 +338,7 @@ def discover_topic(seconds, trends, previous_titles):
     slug = re.sub(r"[^a-z0-9]+", "-", result["title"].lower()).strip("-")
     if not slug or cleaned(result["title"]) in {cleaned(title) for title in previous_titles}:
         raise ValueError("Gemini returned a previously used title.")
-    source = urlsplit(result["source"])
-    host = source.hostname or ""
-    domains = ("nasa.gov", "usgs.gov", "noaa.gov", "si.edu")
-    if (source.scheme != "https" or source.username or source.password or source.port
-            or not source.path.strip("/") or not any(host == domain or host.endswith("." + domain) for domain in domains)):
-        raise ValueError("Gemini did not provide a direct source from an allowed institution.")
-    with requests.get(result["source"], timeout=15, stream=True, allow_redirects=False) as check:
-        if check.status_code != 200:
-            raise ValueError(f"The suggested source needs verification (HTTP {check.status_code}).")
+    visuals.validate_reference(result["source"])
     matched_trend = result["trend"] if any(result["trend"] in titles for titles in trends.values()) else ""
     return {"id": f"discovered-{slug[:64]}", "title": result["title"], "category": result["category"],
             "format": "story", "opening": "statement", "scene": "discovery", "color": "#91DFDA",

@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 import re
 import sys
-from urllib.parse import urlsplit
 
 import shorts
+import visuals
 
-SOURCE_DOMAINS = ("nasa.gov", "noaa.gov", "usgs.gov", "si.edu")
 CATEGORIES = {"Space", "Physics", "Ocean", "History"}
 EXCLUDED = re.compile(r"\b(politics|political|election|religion|religious|worship|campaign rally)\b", re.I)
 
@@ -39,11 +38,7 @@ def parse_idea(raw):
         raise ValueError("duration_seconds must be a whole number from 15 to 25.")
     if category not in CATEGORIES or sum(len(line.split()) for line in (hook, explanation)) > int(seconds * 2.3):
         raise ValueError("Use a supported science category and narration that fits the runtime.")
-    url = urlsplit(source)
-    host = url.hostname or ""
-    if (url.scheme != "https" or url.username or url.password or url.port or not url.path.strip("/")
-            or not any(host == domain or host.endswith("." + domain) for domain in SOURCE_DOMAINS)):
-        raise ValueError("Use a direct HTTPS article from NASA, NOAA, USGS, or Smithsonian.")
+    visuals.validate_reference(source)
     shots = value.get("shots")
     if not isinstance(shots, list) or len(shots) != 3 or any(
         not isinstance(shot, str) or not 0 < len(shot.strip()) <= 360 or "\n" in shot or "\r" in shot
@@ -57,6 +52,10 @@ def parse_idea(raw):
              "opening": "statement", "scene": "discovery", "color": "#91DFDA", "beats": [hook, explanation],
              "source": source, "aliases": [], "labels": labels,
              "discovery": {"trend": "", "shots": [shot.strip() for shot in shots]}}
+    if value.get("media_url"):
+        media_url = field("media_url", 450)
+        visuals.validate_reference(media_url)
+        topic["discovery"]["media"] = {"url": media_url, "relevance": field("media_relevance", 220)}
     return topic, seconds
 
 
@@ -118,13 +117,18 @@ def main():
         if args.mode == "validate":
             print(f"Valid Spark job: {topic['id']} ({seconds}s)")
             return
-        with shorts.requests.get(topic["source"], timeout=20, stream=True, allow_redirects=False) as response:
-            if response.status_code != 200:
-                raise ValueError(f"The source link needs checking (HTTP {response.status_code}).")
         shorts.STATE.mkdir(exist_ok=True)
         shorts.OUTPUT.mkdir(exist_ok=True)
         job = shorts.OUTPUT / topic["id"]
         with shorts.FileLock(shorts.STATE / "worker.lock", timeout=0):
+            media = topic["discovery"].get("media")
+            if media:
+                try:
+                    record = visuals.cache_commons(topic["id"], media["url"])
+                    shorts.save_json(visuals.CACHE / f"{topic['id']}.json", record)
+                except (ValueError, OSError, shorts.requests.RequestException) as error:
+                    print(f"Visual import unavailable ({type(error).__name__}); using original graphics.",
+                          file=sys.stderr)
             shorts.render_job(topic, "Spark idea", seconds, job)
             if args.mode != "draft":
                 publish(job, topic, args.mode)

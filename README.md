@@ -98,8 +98,8 @@ Gemini key and recent trend titles from India and the US, avoids previous
 titles, and writes a dialogue script and three-shot Flow prompt. The local
 renderer uses Kokoro or Piper and animated graphics. Review the draft and
 check the cited article before publishing. Add `--offline` to skip Trends
-and ask for an evergreen idea. Discovery still calls Gemini and checks the
-suggested source online.
+and ask for an evergreen idea. Discovery still calls Gemini and returns a
+proposed source for editorial review.
 
 For five discovery drafts, run `python shorts.py generate --discover --count 5`.
 The app chooses five distinct lengths from 15 to 25 seconds before requesting
@@ -114,6 +114,13 @@ to `api.github.com`. Use `{"ref":"main","inputs":{"idea_json":"<serialized idea>
 See [spark-example.json](spark-example.json) for the inner JSON. The endpoint
 requires a repository-scoped fine-grained token with **Actions: write**.
 Keep that token in the caller's credential store.
+
+Use `source` for a direct citation supporting the narration, from an institution
+or publication appropriate to the subject. Optional `media_url` and
+`media_relevance` describe an exact photo or clip and how it supports the scene.
+The runner automatically imports supported public-domain, CC0, or CC BY files
+from Wikimedia Commons and includes the credit in the draft. Other links are
+retained as suggestions, and the draft falls back to original graphics.
 
 Set the repository Actions variable `SPARK_RENDER_ENABLED=true` after checking
 your included compute and configuring a hard spending stop. The default run creates a private
@@ -135,8 +142,8 @@ $request | gh api --method POST repos/Anmolsarrafbest/auto-video-maker/actions/w
 Give each idea a unique `request_id` and reuse the same ID for any retry. Before
 publishing, the worker reserves the ID with a repository tag to prevent duplicate
 uploads. If publication fails after a reservation, check both platforms before
-any manual retry. The intake validates the category and source host and checks
-that the article opens. Verify the scientific claim before enabling public
+any manual retry. The intake validates the category and citation URL format.
+Verify the scientific claim and asset context before enabling public
 publishing. Google documents Spark custom external apps as MCP connections
 with regional and write-confirmation requirements.
 [Spark custom app requirements](https://support.google.com/gemini/answer/17209137?hl=en)

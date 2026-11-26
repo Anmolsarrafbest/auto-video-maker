@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+from html import unescape
 import io
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import sys
 import time
 from urllib.parse import quote, urlparse
+from urllib.parse import unquote
 
 if __name__ == "__main__":
     import shorts
@@ -20,6 +22,49 @@ from local_secrets import secret
 
 CACHE = Path(__file__).resolve().parent / "assets-cache" / "visuals"
 LIMIT = 40 * 1024 * 1024
+
+
+def validate_reference(value):
+    """Accept editorial citations as metadata without requesting untrusted URLs."""
+    url = urlparse(value)
+    host = url.hostname or ""
+    if (url.scheme != "https" or url.username or url.password or url.port
+            or not url.path.strip("/") or not re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,63}", host)
+            or host.endswith((".local", ".internal", ".localhost", ".test", ".invalid"))):
+        raise ValueError("Give a direct public HTTPS source that supports the claim.")
+    return url
+
+
+def cache_commons(topic_id, source):
+    url = validate_reference(source)
+    title = unquote(url.path.removeprefix("/wiki/"))
+    if url.hostname != "commons.wikimedia.org" or not title.startswith("File:"):
+        raise ValueError("For automatic media import, use a Wikimedia Commons File: page.")
+    response = get("https://commons.wikimedia.org/w/api.php",
+                   headers={"User-Agent": "AutoVideoMaker/1.0 (Commons media lookup)"},
+                   params={"action": "query", "titles": title, "prop": "imageinfo", "format": "json",
+                           "formatversion": 2, "iiprop": "url|mime|extmetadata",
+                           "iiextmetadatafilter": "Artist|LicenseShortName|LicenseUrl"})
+    try:
+        info = response["query"]["pages"][0]["imageinfo"][0]
+        fields = info["extmetadata"]
+        license_name = fields["LicenseShortName"]["value"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise ValueError("Commons did not return a file and license.") from error
+    if license_name not in {"Public domain", "CC0", "CC BY 4.0", "CC BY 3.0", "CC BY 2.0"}:
+        raise ValueError("This Commons license requires manual media review.")
+    mime = info["mime"]
+    if not mime.startswith("video/") and mime not in {"image/jpeg", "image/png", "image/webp"}:
+        raise ValueError("Use a Commons photograph or video.")
+    asset = urlparse(info["url"])
+    if asset.scheme != "https" or asset.hostname != "upload.wikimedia.org":
+        raise ValueError("Unexpected Commons asset host.")
+    artist = unescape(re.sub(r"<[^>]*>", "", fields.get("Artist", {}).get("value", ""))).strip()
+    license_url = fields.get("LicenseUrl", {}).get("value", "")
+    credit = " · ".join(item for item in (artist, license_name, license_url, "cropped for this video") if item)
+    return cache(topic_id, {"kind": "video" if mime.startswith("video/") else "image",
+                            "url": asset._replace(query="", fragment="").geturl(),
+                            "source": source, "credit": " ".join(credit.split()), "automatic": True})
 
 
 def get(url, **kwargs):
@@ -120,7 +165,8 @@ def cache(topic_id, record):
     if not path.is_file():
         temporary = path.with_suffix(".part")
         try:
-            with requests.get(url, stream=True, timeout=(10, 60)) as response:
+            with requests.get(url, stream=True, timeout=(10, 60),
+                              headers={"User-Agent": "AutoVideoMaker/1.0 (credited media cache)"}) as response:
                 response.raise_for_status()
                 with temporary.open("wb") as output:
                     count = 0

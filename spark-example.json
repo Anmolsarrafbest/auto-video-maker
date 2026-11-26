@@ -1,16 +1,18 @@
 {
-  "request_id": "2026-11-26-neptune-winds",
-  "title": "Neptune's supersonic winds",
-  "category": "Space",
+  "request_id": "wright-first-flight-demo",
+  "title": "The Wright brothers' first flight lasted twelve seconds",
+  "category": "History",
   "duration_seconds": 18,
-  "hook": "Neptune has winds faster than the speed of sound on Earth.",
-  "explanation": "Voyager watched clouds streak around the planet. Neptune's winds can reach more than twelve hundred miles per hour.",
-  "opening_label": "Neptune's wind",
-  "payoff_label": "Over 1,200 mph",
-  "source": "https://science.nasa.gov/neptune/",
+  "hook": "Look at the instant the Wright Flyer lifts off.",
+  "explanation": "That first flight lasted twelve seconds. Orville Wright covered one hundred twenty feet before coming back down.",
+  "opening_label": "Kitty Hawk, 1903",
+  "payoff_label": "120 feet in 12 seconds",
+  "source": "https://www.loc.gov/item/00652085/",
+  "media_url": "https://commons.wikimedia.org/wiki/File:First_flight2.jpg",
+  "media_relevance": "John T. Daniels photographed the first flight at its moment of liftoff.",
   "shots": [
-    "Open on a labeled illustration of Neptune as a bright cloud band sweeps across.",
-    "Follow the cloud features with a small motion trace to show how fast they travel.",
-    "Pull back to Neptune and hold the wind-speed comparison for the payoff."
+    "Open on the credited first-flight photograph and ease toward the aircraft.",
+    "Highlight the flight distance with a simple ruler graphic.",
+    "Hold the distance and duration side by side for the payoff."
   ]
 }
