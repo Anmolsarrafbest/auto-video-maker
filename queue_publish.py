@@ -2,10 +2,13 @@
 
 import argparse
 import hashlib
+from pathlib import Path
 import re
 import sys
+from tempfile import TemporaryDirectory
 
 import shorts
+from production import treatment
 
 PROGRESS = shorts.ROOT / "pilot-progress.json"
 PREFIX = "queue-"
@@ -27,7 +30,8 @@ def review_signature(job):
 
 def approval_matches(job):
     review = job / "review.json"
-    return review.is_file() and shorts.read_json(review) == review_signature(job)
+    return (review.is_file() and shorts.read_json(job / "metadata.json").get("production")
+            and shorts.read_json(review) == review_signature(job))
 
 
 def prepare(args, topics):
@@ -62,10 +66,44 @@ def prepare(args, topics):
         print(f"Awaiting review: {job.name}")
 
 
+def refresh(args, topics):
+    catalogue = {topic["id"]: topic for topic in topics}
+    pending = []
+    for job in jobs():
+        if (job / "upload.json").is_file():
+            continue
+        meta = shorts.read_json(job / "metadata.json")
+        topic = catalogue.get(meta["topic_id"])
+        if topic and meta.get("production") != treatment(topic):
+            pending.append((job, meta, topic))
+    if not pending:
+        print("No drafts need the new production treatments.")
+        return
+    trends = {} if args.offline else {region: shorts.fetch_trends(region) for region in ("IN", "US")}
+    archive = shorts.STATE / "previous-renders"
+    archive.mkdir(exist_ok=True)
+    for job, meta, topic in pending:
+        backup = archive / job.name
+        if backup.exists():
+            raise ValueError(f"An earlier version of {job.name} is already archived at {backup}.")
+        with TemporaryDirectory(dir=shorts.STATE, prefix="refresh-") as directory:
+            staged = Path(directory) / job.name
+            shorts.render_job(topic, "Refreshed review draft", meta["duration_seconds"], staged, trends=trends)
+            job.rename(backup)
+            try:
+                staged.rename(job)
+            except OSError:
+                backup.rename(job)
+                raise
+        print(f"Updated {job.name}. The earlier version is at {backup}.")
+
+
 def approve(job, topics):
     if (job / "upload.json").is_file():
         raise ValueError("This video already has an upload record.")
     meta = shorts.read_json(job / "metadata.json")
+    if not meta.get("production"):
+        raise ValueError("Run python queue_publish.py refresh before approving this older draft.")
     topic = next((item for item in topics if item["id"] == meta["topic_id"]), None)
     if topic is None or topic["source"] not in meta["description"]:
         raise ValueError("The draft description must include its original fact source.")
@@ -112,12 +150,15 @@ def status():
         video_id = shorts.read_json(record).get("video_id") if record.is_file() else None
         stage = "uploaded" if video_id else ("approved" if approval_matches(job) else "awaiting review")
         meta = shorts.read_json(job / "metadata.json")
+        direction = meta.get("production")
+        treatment_name = (f" | {direction['voice']}, {direction['soundtrack']}"
+                          if direction else " | older render")
         metrics = job / "metrics.json"
         result = shorts.read_json(metrics) if metrics.is_file() else None
         outcome = (f" | {result['age_hours']}h: {result['stayed_to_watch']:.1f}% stayed, "
                    f"{result['average_viewed']:.1f}% viewed, {result['engaged_views']} engaged views") if result else ""
         url = f" | https://youtu.be/{video_id}" if video_id else ""
-        print(f"{stage:15} {job.name} [{meta['format']}] {meta['title']}{url}{outcome}")
+        print(f"{stage:15} {job.name} [{meta['format']}] {meta['title']}{treatment_name}{url}{outcome}")
 
 
 def record_metrics(args, job):
@@ -140,6 +181,9 @@ def main():
     draft.add_argument("--seconds", type=int, choices=(12, 15, 20), default=15)
     draft.add_argument("--topic", action="append")
     draft.add_argument("--offline", action="store_true")
+    sub.add_parser("refresh", help="Update older drafts and archive their previous versions").add_argument(
+        "--offline", action="store_true"
+    )
     sub.add_parser("status")
     sub.add_parser("approve").add_argument("job")
     release = sub.add_parser("publish")
@@ -160,6 +204,8 @@ def main():
             topics = shorts.read_json(shorts.ROOT / "topics.json")
             if args.command == "prepare":
                 prepare(args, topics)
+            elif args.command == "refresh":
+                refresh(args, topics)
             elif args.command == "status":
                 status()
             elif args.command == "publish":

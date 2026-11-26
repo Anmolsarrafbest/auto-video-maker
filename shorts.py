@@ -20,7 +20,8 @@ import requests
 from filelock import FileLock, Timeout
 from google.auth.exceptions import RefreshError
 
-from render import ANSWER_PAUSE, THINK_LINE, VOICE, encode, narration, spoken_plan
+from production import ATTRIBUTION, VOICE_CREDITS, VOICE_SNAPSHOT, treatment
+from render import ANSWER_PAUSE, THINK_LINE, encode, narration, spoken_plan
 from youtube import read_json, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
@@ -28,12 +29,7 @@ STATE = ROOT / "state"
 VOICE_DIR = ROOT / "voices"
 TOKEN = ROOT / "secrets" / "youtube-token.json"
 CLIENT = ROOT / "secrets" / "youtube-client.json"
-VOICE_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hifi_tts_92/medium"
-ATTRIBUTION = (
-    "Narration synthesized with Piper en_US-hifi_tts_92-medium, trained on the voice of "
-    "Cori Samuel (Hi-Fi TTS reader 92), CC BY 4.0. The audio is synthesized. "
-    "https://openslr.org/109/ | https://creativecommons.org/licenses/by/4.0/"
-)
+VOICE_BASE = f"https://huggingface.co/rhasspy/piper-voices/resolve/{VOICE_SNAPSHOT}/en"
 TOPIC_TAGS = {
     "Space": ("astronomy", "space facts", "#SpaceFacts"),
     "Ocean": ("marine biology", "ocean facts", "#OceanFacts"),
@@ -47,6 +43,7 @@ def youtube_metadata(topic, trends=None):
         topic["category"], ("science facts", "science education", "#ScienceFacts")
     )
     aliases = {cleaned(alias) for alias in topic["aliases"]}
+    voice = treatment(topic)["voice"]
     tags = {"#Shorts": None, "#ScienceShorts": None, hashtag: None}
     for terms in (trends or {}).values():
         for term in terms:
@@ -56,7 +53,7 @@ def youtube_metadata(topic, trends=None):
         "title": topic["beats"][0] if topic.get("format", "quiz") in {"quiz", "myth"} else topic["title"],
         "description": (
             f'{topic["beats"][1]}\n\nSource: {topic["source"]}\n\n'
-            f'{ATTRIBUTION}\n\n{" ".join(tags)}'
+            f'{VOICE_CREDITS[voice]}\n\n{" ".join(tags)}'
         ),
         "tags": list(dict.fromkeys([*topic["aliases"], category, related, "science shorts"])),
         "language": "en",
@@ -131,20 +128,24 @@ def draft_beats(topic, seconds):
 
 def setup_voice():
     VOICE_DIR.mkdir(exist_ok=True)
-    for filename in (f"{VOICE}.onnx", f"{VOICE}.onnx.json", "MODEL_CARD"):
-        path = VOICE_DIR / filename
-        if path.is_file():
-            continue
-        partial = path.with_suffix(path.suffix + ".part")
-        with requests.get(f"{VOICE_BASE}/{filename}", timeout=(15, 90), stream=True) as response:
-            response.raise_for_status()
-            with partial.open("wb") as handle:
-                for chunk in response.iter_content(1024 * 1024):
-                    handle.write(chunk)
-        if partial.stat().st_size < (1_000_000 if filename.endswith(".onnx") else 50):
-            raise ValueError(f"The downloaded Piper file appears incomplete: {filename}.")
-        partial.replace(path)
-    print(f"Piper voice ready in {VOICE_DIR}")
+    for voice in VOICE_CREDITS:
+        language, speaker, quality = voice.split("-")
+        for filename in (f"{voice}.onnx", f"{voice}.onnx.json", "MODEL_CARD"):
+            local_name = f"{voice}.model-card.md" if filename == "MODEL_CARD" else filename
+            path = VOICE_DIR / local_name
+            if path.is_file():
+                continue
+            partial = path.with_suffix(path.suffix + ".part")
+            with requests.get(f"{VOICE_BASE}/{language}/{speaker}/{quality}/{filename}",
+                              timeout=(15, 90), stream=True) as response:
+                response.raise_for_status()
+                with partial.open("wb") as handle:
+                    for chunk in response.iter_content(1024 * 1024):
+                        handle.write(chunk)
+            if partial.stat().st_size < (1_000_000 if filename.endswith(".onnx") else 50):
+                raise ValueError(f"The downloaded Piper file appears incomplete: {filename}.")
+            partial.replace(path)
+    print(f"Piper voices ready in {VOICE_DIR}")
 
 
 def completed_jobs():
@@ -156,13 +157,14 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
     if job.exists():
         raise ValueError(f"The output directory already exists: {job}")
     beats = topic["beats"]
+    direction = treatment(topic)
     if use_gemini:
         try:
             beats = draft_beats(topic, seconds)
         except requests.RequestException:
             print("Gemini could not be reached. Using sourced narration.", file=sys.stderr)
     def write_audio(script):
-        return narration(script, seconds, VOICE_DIR / f"{VOICE}.onnx", wav, topic=topic)
+        return narration(script, seconds, VOICE_DIR / f'{direction["voice"]}.onnx', wav, topic=topic)
 
     with tempfile.TemporaryDirectory(dir=STATE, prefix="render-") as directory:
         scratch = Path(directory) / "job"
@@ -188,6 +190,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             **youtube_metadata(topic, trends),
             "narration": [line for _, line, _ in spoken_plan(topic, beats)],
             "format": style, "source": topic["source"],
+            "production": direction,
             "answer_pause_seconds": pause, "needs_review": beats != topic["beats"],
             "made_for_kids": False, "synthetic_media": False,
         })
@@ -199,8 +202,9 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             'Keep the opening visuals on the subject and save the explanation for the reveal.\n'
             f'Then answer it in voice-over: {beats[1]}\n'
             f'Illustrate the answer: {topic["labels"][0].lower()}, then {topic["labels"][1].lower()}.\n'
-            'Use a mellow instrumental groove with warm chords, a bass line, and light percussion. '
-            'Keep it under the voice and bring it forward during the pause.\n'
+            f'Use a {direction["delivery"]} delivery and a {direction["soundtrack"]} soundtrack. '
+            f'Use a consistent narrator and build a distinct {direction["theme"]} visual treatment. '
+            'Keep music below the voice.\n'
             'Use illustrated motion graphics, clear visual transitions, and no logos or onscreen text.\n',
             encoding="utf-8",
         )
@@ -238,7 +242,9 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
                 meta["title"] = defaults["title"]
             old_description = f'{topic["title"]}.\n\nSource: {topic["source"]}\n\n{ATTRIBUTION}'
             if meta["description"] == old_description:
-                meta["description"] = defaults["description"]
+                meta["description"] = defaults["description"].replace(
+                    VOICE_CREDITS[treatment(topic)["voice"]], ATTRIBUTION
+                )
             elif "#shorts" not in meta["description"].lower():
                 meta["description"] += "\n\n" + defaults["description"].split("\n\n")[-1]
             meta.update(tags=defaults["tags"], language=defaults["language"])
@@ -250,7 +256,7 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
 def cli():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("setup-voice", help="Download the free Piper voice")
+    sub.add_parser("setup-voice", help="Download the free Piper voice set")
     connect = sub.add_parser("connect-youtube", help="Authenticate the intended YouTube channel")
     connect.add_argument("--client", type=Path, default=CLIENT,
                          help="Path to the downloaded Google OAuth Desktop client JSON")

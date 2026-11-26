@@ -11,10 +11,35 @@ import wave
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
+from production import treatment
+
 WIDTH, HEIGHT, FPS = 720, 1280, 24
-VOICE = "en_US-hifi_tts_92-medium"
 THINK_LINE = "Think about it."
 ANSWER_PAUSE = 1.5
+PALETTES = {
+    "observatory": ((9, 14, 29), (10, 12, 21), "#405273", "#0D1527", 30),
+    "archive": ((27, 19, 20), (25, 17, 12), "#705040", "#251B1B", 8),
+    "lab": ((8, 26, 26), (9, 20, 15), "#376761", "#102824", 13),
+    "ocean": ((6, 20, 34), (6, 28, 29), "#37657B", "#0B2537", 42),
+}
+
+# Each arrangement has its own chord progression, phrasing and instruments.
+SCORES = {
+    "ambient synth": (.72, ((45, 57, 60, 64, 71), (41, 53, 60, 64, 67),
+                           (48, 60, 64, 67, 74), (43, 55, 62, 69, 71)), (0, 2, 1, 3), .35, .75),
+    "felt piano": (.81, ((48, 60, 64, 67, 71), (45, 57, 60, 64, 69),
+                        (50, 62, 65, 69, 72), (43, 55, 59, 65, 69)), (3, 1, 2, 0), .08, 1.30),
+    "syncopated marimba": (.52, ((50, 62, 65, 69, 72), (43, 55, 59, 62, 67),
+                                 (48, 60, 64, 67, 72), (45, 57, 61, 64, 69)), (1, 3, 0, 2), 1, 1.10),
+    "slow instrumental swell": (.91, ((40, 52, 55, 59, 66), (47, 59, 62, 66, 69),
+                                     (45, 57, 60, 64, 71), (43, 55, 59, 62, 67)), (0, 1, 3, 2), .18, .45),
+}
+DELIVERY = {
+    "documentary": (1.05, .50, .36),
+    "precise": (.94, .42, .23),
+    "curious": (.99, .57, .42),
+    "gentle": (1.08, .46, .32),
+}
 
 
 def spoken_plan(topic, beats):
@@ -31,8 +56,10 @@ def spoken_plan(topic, beats):
     return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
 
 
-def font(size, bold=False):
+def font(size, bold=False, serif=False):
     names = ("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold else ("arial.ttf", "DejaVuSans.ttf")
+    if serif:
+        names = ("timesbd.ttf", "DejaVuSerif-Bold.ttf") + names
     for name in names:
         try:
             return ImageFont.truetype(name, size)
@@ -203,20 +230,37 @@ def illustration(draw, scene, accent, time, beat):
 
 def frames(topic, beats, timings, seconds):
     accent = ImageColor.getrgb(topic["color"])
+    theme = treatment(topic)["theme"]
+    base, tint, border, caption_fill, radius = PALETTES[theme]
     background = Image.new("RGB", (WIDTH, HEIGHT))
     draw = ImageDraw.Draw(background)
     for y in range(HEIGHT):
         glow = max(0, 1 - abs(y - 545) / 650)
-        draw.line((0, y, WIDTH, y), fill=(9 + int(10 * glow), 14 + int(12 * glow), 29 + int(21 * glow)))
-    rng = random.Random(topic["id"])
-    for _ in range(64):
-        x, y = rng.randrange(62, 641), rng.randrange(336, 752)
-        circle(draw, x, y, rng.choice((1, 1, 2)), "#465677")
-    draw.rounded_rectangle((53, 323, 643, 756), radius=30, outline="#405273", width=2)
+        draw.line((0, y, WIDTH, y), fill=tuple(component + int(change * glow)
+                                              for component, change in zip(base, tint)))
+    if theme == "lab":
+        for x in range(77, 640, 33):
+            draw.line((x, 336, x, 743), fill="#23463F")
+        for y in range(345, 744, 33):
+            draw.line((64, y, 630, y), fill="#23463F")
+    elif theme == "archive":
+        for y in range(350, 750, 32):
+            draw.line((70, y, 627, y), fill="#513932")
+            draw.line((70, y - 4, 87, y - 4), fill=border)
+    elif theme == "ocean":
+        for index in range(9):
+            path = [(x, 349 + index * 47 + 10 * math.sin(x / 62 + index)) for x in range(66, 631, 7)]
+            draw.line(path, fill="#1D4657", width=2)
+    else:
+        rng = random.Random(topic["id"])
+        for _ in range(64):
+            x, y = rng.randrange(62, 641), rng.randrange(336, 752)
+            circle(draw, x, y, rng.choice((1, 1, 2)), "#465677")
+    draw.rounded_rectangle((53, 323, 643, 756), radius=radius, outline=border, width=2)
     draw.text((58, 140), topic["category"].upper(), font=font(25, True), fill=accent)
-    headline = font(53, True)
+    headline = font(53, True, serif=theme == "archive")
     if wrap(beats[0], headline, 576).count("\n") > 1:
-        headline = font(42, True)
+        headline = font(42, True, serif=theme == "archive")
     draw.multiline_text((55, 184), wrap(beats[0], headline, 576), font=headline,
                         fill="#F7F3EA", spacing=2)
     plan = spoken_plan(topic, beats)
@@ -241,32 +285,27 @@ def frames(topic, beats, timings, seconds):
                       fill=accent, anchor="mm")
         caption, face = captions[part]
         if caption:
-            draw.rounded_rectangle((54, 811, 642, 1029), radius=24, fill="#0D1527", outline="#31415E", width=2)
+            draw.rounded_rectangle((54, 811, 642, 1029), radius=radius, fill=caption_fill, outline=border, width=2)
             draw.multiline_text((348, 916), caption, font=face,
                                 fill="#F7F3EA", anchor="mm", align="center", spacing=7)
-        draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill="#405273")
+        draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill=border)
         draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
         yield img
 
 
-def mix_music(audio, rate, timings, style="quiz"):
-    """Build an original groove from sustained chords, bass and brushed percussion."""
+def mix_music(audio, rate, timings, topic):
+    """Compose an original background score around the episode's delivery."""
     samples = array("h")
     samples.frombytes(audio)
-    beat_length, transpose, percussion = {
-        "quiz": (.6, 1, 1),
-        "story": (.72, .89, .40),
-        "myth": (.53, 1.12, .85),
-        "demo": (.62, 1.06, .68),
-    }[style]
+    score = treatment(topic)["soundtrack"]
+    beat_length, progression, motif, percussion, lead = SCORES[score]
+    random_noise = random.Random(topic.get("id", score))
+    key = random_noise.choice((-2, -1, 0, 2, 3))
+    inversion = random_noise.randrange(len(motif))
+    motif = motif[inversion:] + motif[:inversion]
+    beat_length *= random_noise.uniform(.91, 1.09)
     bar_length = beat_length * 4
-    # Am7, Fmaj7, Cmaj7, Gadd9. Add a fresh chord every four beats.
-    chords = ((110, 220, 261.63, 329.63, 392),
-              (87.31, 174.61, 220, 261.63, 329.63),
-              (130.81, 261.63, 329.63, 392, 493.88),
-              (98, 196, 246.94, 293.66, 440))
-    chords = [tuple(note * transpose for note in chord) for chord in chords]
-    random_noise = random.Random(style)
+    chords = [tuple(440 * 2 ** ((note + key - 69) / 12) for note in chord) for chord in progression]
     for index, speech in enumerate(samples):
         time = index / rate
         bar = time % bar_length
@@ -277,17 +316,28 @@ def mix_music(audio, rate, timings, style="quiz"):
             for note in tones
         ) / len(tones)
         pulse = bar % beat_length
-        bass = 1850 * min(1, pulse * 75) * math.exp(-pulse * 3) * math.sin(math.tau * root * pulse)
+        bass = 1600 * min(1, pulse * 75) * math.exp(-pulse * 3) * math.sin(math.tau * root * pulse)
         kick = 900 * math.exp(-pulse * 25) * math.sin(math.tau * (45 * pulse + .7 * (1 - math.exp(-35 * pulse))))
         brush = 590 * random_noise.uniform(-1, 1) * math.exp(-(bar % (beat_length / 2)) * 40)
         melody_time = pulse
-        note = tones[(0, 2, 1, 3)[min(3, int(bar / beat_length))]] * 2
-        keys = 700 * min(1, melody_time * 60) * math.exp(-melody_time * 6) * math.sin(math.tau * note * melody_time)
+        note = tones[motif[min(3, int(bar / beat_length))]] * 2
+        angle = math.tau * note * melody_time
+        color = math.sin(angle)
+        if score == "syncopated marimba":
+            melody_time = (bar + beat_length / 3) % beat_length
+            angle = math.tau * note * melody_time
+            color = math.sin(angle) + .28 * math.sin(3.97 * angle)
+        elif score == "felt piano":
+            color += .18 * math.sin(2 * angle) + .09 * math.sin(3.01 * angle)
+        elif score == "slow instrumental swell":
+            color *= .5 + .5 * math.sin(bar * math.tau / bar_length - math.pi / 2)
+        keys = 640 * lead * min(1, melody_time * 60) * math.exp(-melody_time * 6) * color
         distance = min(max(start - time, time - end, 0) for start, end in timings)
         duck = .53 + .47 * min(1, distance / .14)
         fade = min(1, (time + .03) * 8, (len(samples) - index) / (.38 * rate))
         music = pad + bass + percussion * (kick + brush) + keys
-        samples[index] = round(speech * .76 + 1.45 * fade * duck * music)
+        mixed = round(speech * .76 + 1.45 * fade * duck * music)
+        samples[index] = max(-32768, min(32767, mixed))
     return samples.tobytes()
 
 
@@ -301,9 +351,16 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     topic = topic or {}
     plan = spoken_plan(topic, beats)
     gaps = [gap for _, _, gap in plan]
+    speed, expression, rhythm = DELIVERY[treatment(topic)["delivery"]]
     for pace in (1, .92, .84, .76):
-        clips = [b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(
-            line, syn_config=SynthesisConfig(length_scale=pace))) for _, line, _ in plan]
+        clips = []
+        for role, line, _ in plan:
+            config = SynthesisConfig(
+                length_scale=pace * speed * (1.06 if role == "pause" else 1),
+                noise_scale=expression, noise_w_scale=rhythm,
+                volume=.90 if role == "pause" else 1,
+            )
+            clips.append(b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(line, syn_config=config)))
         if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
             break
     else:
@@ -319,7 +376,7 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
         timings.append((start / rate, end / rate))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        wav.writeframes(mix_music(audio, rate, timings, topic.get("format", "quiz")))
+        wav.writeframes(mix_music(audio, rate, timings, topic))
     return timings
 
 

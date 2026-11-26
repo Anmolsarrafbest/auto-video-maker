@@ -2,7 +2,7 @@
 
 Generate 12-, 15-, or 20-second vertical science Shorts with original animated illustrations, Piper narration, and captions. Draft generation works without a Gemini key or a YouTube account. Uploading uses the free YouTube Data API after you connect your channel.
 
-Quiz Shorts ask a question, say “Think about it,” then wait 1.5 seconds. Science-history stories, myth checks, and visual demonstrations use different timing and sound arrangements. Shorter caption phrases follow the spoken sentences. The exported Flow prompt follows the selected format.
+Quiz Shorts ask a question, say “Think about it,” then wait 1.5 seconds. Science-history stories, myth checks, and visual demonstrations use different timing. Archive, laboratory, observatory, and ocean treatments use different palettes and custom illustrations. The app selects one of three local Piper voices and composes an instrumental score for each episode. The exported Flow prompt and upload metadata record the selected treatment and narration credit.
 
 ## Run locally on Windows
 
@@ -14,7 +14,7 @@ python shorts.py setup-voice
 python shorts.py generate --topic venus-spin --seconds 12 --offline
 ```
 
-The first two commands download open-source dependencies and Piper's English voice. The Python package supplies FFmpeg. `setup-voice` also saves the model card, and video descriptions include voice attribution.
+The first two commands download open-source dependencies and three English Piper voice models, including Scottish and U.S. English narrators. The Python package supplies FFmpeg. `setup-voice` saves each pinned model card, and video descriptions credit the voice used.
 
 Open the printed `short.mp4` path. The same folder contains `preview.png`, `metadata.json`, and `flow-prompt.txt`. The Flow prompt is optional and can be pasted into Google Flow manually.
 
@@ -87,6 +87,8 @@ python queue_publish.py status
 ```
 
 Use `python queue_publish.py prepare --count 4` to prepare a mixed batch of unused topics. Preview each MP4 in `output/` and confirm its factual claim, source, and visuals. Approve individual drafts after checking them. Editing the video or metadata clears the effective approval until you approve again.
+
+To update older unpublished drafts after installing the voice set, run `python queue_publish.py refresh`. Older media and any prior approvals are saved in `state/previous-renders/`. Review the new version as its own draft. At review time, check that the explanation or demonstration teaches something distinct. A change of voice, music, or colors alone is not an editorial reason to publish.
 
 ```powershell
 python queue_publish.py approve queue-katherine-johnson
