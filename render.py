@@ -3,15 +3,18 @@
 import math
 from array import array
 from bisect import bisect_right
+from contextlib import ExitStack
 import os
 import random
 import re
 import subprocess
 import wave
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
 
-from production import treatment
+from hindi_captions import ass_filter
+from local_voices import HindiSpeech, windows_pcm
+from production import HINDI, INDIAN_ENGLISH, treatment
 
 WIDTH, HEIGHT, FPS = 720, 1280, 24
 THINK_LINE = "Think about it."
@@ -42,13 +45,17 @@ DELIVERY = {
 }
 
 
+def think_line(topic):
+    return "ज़रा सोचिए।" if topic.get("language") == "hi" else THINK_LINE
+
+
 def spoken_plan(topic, beats):
     """Share the audio and caption schedule for a topic's editorial format."""
     style = topic.get("format", "quiz")
     plan = [("hook", beats[0], .14)]
     if style == "quiz":
-        plan.append(("pause", THINK_LINE, .18))
-    parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+", beats[1])
+        plan.append(("pause", think_line(topic), .18))
+    parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+|(?<=।)\s+", beats[1])
     # Keep brief replies such as “No.” attached to the explanation.
     if len(parts) > 1 and len(parts[0].split()) < 4:
         parts[:2] = [" ".join(parts[:2])]
@@ -108,6 +115,18 @@ def illustration(draw, scene, accent, time, beat):
         draw.arc((earth_x - 48, y - 54, earth_x + 46, y + 53), 105, 284, fill="#63CEBA", width=10)
         circle(draw, 477 + offset, y, 40, accent)
         circle(draw, 466 + offset, y - 9, 11, "#8A709C" if scene == "distance" else "#B9574D")
+    elif scene == "white-dwarf":
+        radius = 89 - 15 * min(1, time / 7)
+        for glow in range(5, 0, -1):
+            circle(draw, x, y, radius + glow * 10, (30 + (5 - glow) * 13, 27 + (5 - glow) * 14, 58 + (5 - glow) * 17))
+        circle(draw, x, y, radius, "#E9E8FF", accent, 4)
+        if beat:
+            for angle in (0, math.pi / 2, math.pi, math.pi * 1.5):
+                dx, dy = math.cos(angle), math.sin(angle)
+                ax, ay = x + dx * (radius + 20), y + dy * (radius + 20)
+                draw.line((x + dx * 151, y + dy * 151, ax, ay), fill=accent, width=5)
+                draw.polygon([(ax, ay), (ax + dx * 15 - dy * 8, ay + dy * 15 + dx * 8),
+                              (ax + dx * 15 + dy * 8, ay + dy * 15 - dx * 8)], fill=accent)
     elif scene == "trajectory":
         draw.ellipse((143, y - 116, 553, y + 116), outline="#587294", width=3)
         circle(draw, x, y, 75, "#295887", "#8ABCCD", 3)
@@ -228,7 +247,7 @@ def illustration(draw, scene, accent, time, beat):
                       fill=color, width=3)
 
 
-def frames(topic, beats, timings, seconds):
+def frames(topic, beats, timings, seconds, archive_path=None):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
     base, tint, border, caption_fill, radius = PALETTES[theme]
@@ -257,12 +276,19 @@ def frames(topic, beats, timings, seconds):
             x, y = rng.randrange(62, 641), rng.randrange(336, 752)
             circle(draw, x, y, rng.choice((1, 1, 2)), "#465677")
     draw.rounded_rectangle((53, 323, 643, 756), radius=radius, outline=border, width=2)
-    draw.text((58, 140), topic["category"].upper(), font=font(25, True), fill=accent)
+    hindi = topic.get("language") == "hi"
+    if not hindi:
+        draw.text((58, 140), topic["category"].upper(), font=font(25, True), fill=accent)
     headline = font(53, True, serif=theme == "archive")
     if wrap(beats[0], headline, 576).count("\n") > 1:
         headline = font(42, True, serif=theme == "archive")
-    draw.multiline_text((55, 184), wrap(beats[0], headline, 576), font=headline,
-                        fill="#F7F3EA", spacing=2)
+    if not hindi:
+        draw.multiline_text((55, 184), wrap(beats[0], headline, 576), font=headline,
+                            fill="#F7F3EA", spacing=2)
+    photograph = None
+    if archive_path:
+        with Image.open(archive_path) as source:
+            photograph = ImageOps.contain(source.convert("RGB"), (535, 342))
     plan = spoken_plan(topic, beats)
     starts = [start for start, _ in timings]
     captions = []
@@ -278,16 +304,21 @@ def frames(topic, beats, timings, seconds):
         beat = int(plan[part][0] == "answer")
         img = background.copy()
         draw = ImageDraw.Draw(img)
-        illustration(draw, topic["scene"], accent, time, beat)
-        if beat:
+        if photograph is not None and not beat:
+            img.paste(photograph, ((696 - photograph.width) // 2, 341 + (342 - photograph.height) // 2))
+            draw.text((348, 714), topic["archive"]["label"], font=font(20, True), fill=accent, anchor="mm")
+        else:
+            illustration(draw, topic["scene"], accent, time, beat)
+        if beat and not hindi:
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 550 else font(20, True),
                       fill=accent, anchor="mm")
         caption, face = captions[part]
         if caption:
             draw.rounded_rectangle((54, 811, 642, 1029), radius=radius, fill=caption_fill, outline=border, width=2)
-            draw.multiline_text((348, 916), caption, font=face,
-                                fill="#F7F3EA", anchor="mm", align="center", spacing=7)
+            if not hindi:
+                draw.multiline_text((348, 916), caption, font=face,
+                                    fill="#F7F3EA", anchor="mm", align="center", spacing=7)
         draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill=border)
         draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
         yield img
@@ -342,29 +373,41 @@ def mix_music(audio, rate, timings, topic):
 
 
 def narration(beats, seconds, voice_path, destination, *, topic=None):
-    from piper import PiperVoice, SynthesisConfig
-
-    if not voice_path.is_file():
-        raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
-    voice = PiperVoice.load(voice_path)
-    rate = voice.config.sample_rate
     topic = topic or {}
     plan = spoken_plan(topic, beats)
     gaps = [gap for _, _, gap in plan]
-    speed, expression, rhythm = DELIVERY[treatment(topic)["delivery"]]
-    for pace in (1, .92, .84, .76):
-        clips = []
-        for role, line, _ in plan:
-            config = SynthesisConfig(
-                length_scale=pace * speed * (1.06 if role == "pause" else 1),
-                noise_scale=expression, noise_w_scale=rhythm,
-                volume=.90 if role == "pause" else 1,
-            )
-            clips.append(b"".join(chunk.audio_int16_bytes for chunk in voice.synthesize(line, syn_config=config)))
-        if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
-            break
-    else:
-        raise ValueError("Narration does not fit the selected duration. Try 15 seconds.")
+    direction = treatment(topic)
+    speed, expression, rhythm = DELIVERY[direction["delivery"]]
+    with ExitStack() as stack:
+        if direction["voice"] == HINDI:
+            hindi = stack.enter_context(HindiSpeech())
+        elif direction["voice"] != INDIAN_ENGLISH:
+            from piper import PiperVoice, SynthesisConfig
+
+            if not voice_path.is_file():
+                raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
+            voice = PiperVoice.load(voice_path)
+
+        def synthesize(role, line, pace):
+            length = pace * speed * (1.06 if role == "pause" else 1)
+            if direction["voice"] == HINDI:
+                return hindi.synthesize(line, 1 / length)
+            if direction["voice"] == INDIAN_ENGLISH:
+                return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
+            config = SynthesisConfig(length_scale=length, noise_scale=expression, noise_w_scale=rhythm,
+                                     volume=.90 if role == "pause" else 1)
+            chunks = voice.synthesize(line, syn_config=config)
+            return voice.config.sample_rate, b"".join(chunk.audio_int16_bytes for chunk in chunks)
+
+        for pace in (1, .92, .84, .76):
+            rates, clips = zip(*(synthesize(role, line, pace) for role, line, _ in plan))
+            rate = rates[0]
+            if any(value != rate for value in rates):
+                raise ValueError("Narration chunks have inconsistent sample rates.")
+            if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
+                break
+        else:
+            raise ValueError("Narration does not fit the selected duration. Try a longer duration.")
 
     audio = bytearray(2 * rate * seconds)
     timings = []
@@ -380,19 +423,23 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     return timings
 
 
-def encode(topic, beats, timings, seconds, wav_path, destination, poster=None):
+def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *, archive_path=None):
     import imageio_ffmpeg
 
     ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{WIDTH}x{HEIGHT}",
-           "-framerate", str(FPS), "-i", "-", "-i", str(wav_path), "-map", "0:v", "-map", "1:a",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+           "-framerate", str(FPS), "-i", "-", "-i", str(wav_path), "-map", "0:v", "-map", "1:a"]
+    hindi = topic.get("language") == "hi"
+    if hindi:
+        cmd.extend(["-vf", ass_filter(wav_path.parent, topic, spoken_plan(topic, beats), timings, seconds)])
+    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-t", str(seconds), str(destination)]
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE) as process:
+    )
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, cwd=wav_path.parent) as process:
         try:
-            for index, image in enumerate(frames(topic, beats, timings, seconds)):
-                if poster and index == FPS:
+            for index, image in enumerate(frames(topic, beats, timings, seconds, archive_path)):
+                if poster and index == FPS and not hindi:
                     image.save(poster)
                 process.stdin.write(image.tobytes())
         except BrokenPipeError:
@@ -401,3 +448,6 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None):
             process.stdin.close()
         if process.wait():
             raise ValueError("FFmpeg could not encode the Short.")
+    if poster and hindi:
+        subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "1",
+                        "-i", str(destination), "-frames:v", "1", str(poster)], check=True)

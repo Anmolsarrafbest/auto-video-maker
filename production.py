@@ -4,6 +4,8 @@ VOICE = "en_US-hifi_tts_92-medium"
 VOICE_SNAPSHOT = "5ec43b186ef915a195d3ddbcfd9916e76c503c3f"
 ALBA = "en_GB-alba-medium"
 JOE = "en_US-joe-medium"
+INDIAN_ENGLISH = "Microsoft Heera"
+HINDI = "eSpeak NG Hindi"
 ATTRIBUTION = (
     "Narration synthesized with Piper en_US-hifi_tts_92-medium, trained on the voice of "
     "Cori Samuel (Hi-Fi TTS reader 92), CC BY 4.0. The audio is synthesized. "
@@ -49,9 +51,26 @@ def treatment(topic):
     if topic.get("format") == "demo":
         theme = "lab"
     voice, delivery, soundtrack = TREATMENTS[theme]
-    return {
+    voice = TOPIC_VOICES.get(topic.get("id"), voice)
+    language = topic.get("language", "en")
+    if language == "en-IN":
+        voice = INDIAN_ENGLISH
+    elif language == "hi":
+        voice = HINDI
+    result = {
         "theme": theme,
-        "voice": TOPIC_VOICES.get(topic.get("id"), voice),
+        "voice": voice,
         "delivery": delivery,
         "soundtrack": soundtrack,
     }
+    if language != "en":
+        result["language"] = language
+    return result
+
+
+def voice_credit(voice):
+    extra = {
+        INDIAN_ENGLISH: "Narration synthesized locally with Microsoft Heera, Windows English (India).",
+        HINDI: "हिंदी वाचन eSpeak NG से बनाया गया। https://github.com/espeak-ng/espeak-ng",
+    }
+    return extra[voice] if voice in extra else VOICE_CREDITS[voice]

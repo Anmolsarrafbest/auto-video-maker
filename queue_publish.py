@@ -6,9 +6,9 @@ from pathlib import Path
 import re
 import sys
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import shorts
-from production import treatment
 
 PROGRESS = shorts.ROOT / "pilot-progress.json"
 PREFIX = "queue-"
@@ -43,7 +43,8 @@ def prepare(args, topics):
         shorts.read_json(job / "metadata.json")["topic_id"] for job in shorts.completed_jobs()
         if job.name.startswith(PREFIX) or (job / "upload.json").is_file()
     }
-    available = [topic for topic in topics if topic["id"] not in used]
+    available = [topic for topic in topics if topic["id"] not in used
+                 and (args.language is None or topic.get("language", "en") == args.language)]
     if args.topic:
         selected = [topic for topic_id in dict.fromkeys(args.topic)
                     for topic in available if topic["id"] == topic_id]
@@ -74,7 +75,7 @@ def refresh(args, topics):
             continue
         meta = shorts.read_json(job / "metadata.json")
         topic = catalogue.get(meta["topic_id"])
-        if topic and meta.get("production") != treatment(topic):
+        if topic and meta.get("production") != shorts.render_treatment(topic):
             pending.append((job, meta, topic))
     if not pending:
         print("No drafts need the new production treatments.")
@@ -85,7 +86,7 @@ def refresh(args, topics):
     for job, meta, topic in pending:
         backup = archive / job.name
         if backup.exists():
-            raise ValueError(f"An earlier version of {job.name} is already archived at {backup}.")
+            backup = archive / f"{job.name}-{uuid4().hex[:8]}"
         with TemporaryDirectory(dir=shorts.STATE, prefix="refresh-") as directory:
             staged = Path(directory) / job.name
             shorts.render_job(topic, "Refreshed review draft", meta["duration_seconds"], staged, trends=trends)
@@ -107,6 +108,11 @@ def approve(job, topics):
     topic = next((item for item in topics if item["id"] == meta["topic_id"]), None)
     if topic is None or topic["source"] not in meta["description"]:
         raise ValueError("The draft description must include its original fact source.")
+    if meta["production"].get("archive_source"):
+        archive = topic.get("archive")
+        if (archive is None or archive != meta.get("archive") or
+                archive["credit"] not in meta["description"] or archive["source"] not in meta["description"]):
+            raise ValueError("Restore the archival photograph credit and source before approving the Short.")
     default = shorts.youtube_metadata(topic)
     allowed = {word.lower() for word in default["description"].splitlines()[-1].split()}
     allowed.update("#" + shorts.cleaned(alias).replace(" ", "") for alias in topic["aliases"])
@@ -174,12 +180,14 @@ def record_metrics(args, job):
 
 
 def main():
+    shorts.configure_console()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     draft = sub.add_parser("prepare")
     draft.add_argument("--count", type=int, choices=range(1, 21), default=4)
     draft.add_argument("--seconds", type=int, choices=(12, 15, 20), default=15)
     draft.add_argument("--topic", action="append")
+    draft.add_argument("--language", choices=("en", "en-IN", "hi"))
     draft.add_argument("--offline", action="store_true")
     sub.add_parser("refresh", help="Update older drafts and archive their previous versions").add_argument(
         "--offline", action="store_true"

@@ -4,28 +4,61 @@
     "title": "Katherine Johnson double-checked a spaceflight", "labels": ["FRIENDSHIP 7", "ORBIT CALCULATIONS CHECKED BY HAND"],
     "aliases": ["katherine johnson", "friendship 7"],
     "beats": ["Before his orbital flight, John Glenn asked for one more check.", "Katherine Johnson redid the computer's calculations by hand. Her work helped give Glenn confidence to fly."],
-    "source": "https://www.nasa.gov/people-of-nasa/katherine-g-johnson/"
+    "source": "https://www.nasa.gov/people-of-nasa/katherine-g-johnson/",
+    "archive": {
+      "image": "https://images-assets.nasa.gov/image/LRC-1971-B701_P-03033/LRC-1971-B701_P-03033~large.jpg",
+      "source": "https://science.nasa.gov/image-detail/amf-lrc-1971-b701_p-03033/",
+      "credit": "NASA Langley Research Center, portrait of Katherine Johnson, 1971. Used in factual editorial context under NASA’s media guidelines.",
+      "label": "KATHERINE JOHNSON · NASA PORTRAIT, 1971"
+    }
   },
   {
     "id": "wright-first-flight", "category": "History", "format": "story", "scene": "flight", "color": "#EEC48B",
     "title": "The Wright brothers’ twelve-second flight", "labels": ["KITTY HAWK, 1903", "12 SECONDS · 120 FEET"],
     "aliases": ["wright brothers", "wright flyer", "kitty hawk first flight"],
     "beats": ["The Wright brothers' first flight lasted twelve seconds.", "Orville flew just one hundred twenty feet. That short distance marked a breakthrough for controlled, powered flight."],
-    "source": "https://www.nps.gov/articles/wrightflyer.htm"
+    "source": "https://www.nps.gov/articles/wrightflyer.htm",
+    "archive": {
+      "image": "https://cdn.loc.gov/service/pnp/cph/3a50000/3a53000/3a53200/3a53266v.jpg",
+      "source": "https://www.loc.gov/resource/cph.3a53266/",
+      "credit": "John T. Daniels, first flight at Kitty Hawk, 1903. Library of Congress, Wright Brothers Negatives. No known publication restrictions.",
+      "label": "FIRST FLIGHT · LIBRARY OF CONGRESS"
+    }
   },
   {
     "id": "leavitt-stars", "category": "History", "format": "story", "scene": "cepheid", "color": "#D6BEFF",
     "title": "How Henrietta Leavitt turned stars into distance markers", "labels": ["A REPEATING PULSE", "BRIGHTER CEPHEIDS PULSE MORE SLOWLY"],
     "aliases": ["henrietta leavitt", "henrietta swan leavitt", "cepheid variable"],
     "beats": ["Henrietta Leavitt found a pattern in pulsing stars.", "Brighter Cepheid stars pulse more slowly. Her discovery gave astronomers a way to estimate distances across space."],
-    "source": "https://science.nasa.gov/missions/roman-space-telescope/the-universe-is-expanding-faster-these-days-and-dark-energy-is-responsible-so-what-is-dark-energy/"
+    "source": "https://science.nasa.gov/missions/roman-space-telescope/the-universe-is-expanding-faster-these-days-and-dark-energy-is-responsible-so-what-is-dark-energy/",
+    "archive": {
+      "image": "https://upload.wikimedia.org/wikipedia/commons/9/97/Henrietta_Swan_Leavitt_1921.png",
+      "source": "https://commons.wikimedia.org/wiki/File:Henrietta_Swan_Leavitt_1921.png",
+      "credit": "William Henry, portrait published in The Woman Citizen, 1921. Public domain in the United States, via Wikimedia Commons.",
+      "label": "HENRIETTA LEAVITT · PORTRAIT, 1921"
+    }
   },
   {
-    "id": "raman-light", "category": "History", "format": "demo", "scene": "raman", "color": "#85E4C6",
+    "id": "raman-light", "category": "History", "format": "demo", "scene": "raman", "color": "#85E4C6", "language": "en-IN",
     "title": "What C. V. Raman discovered about scattered light", "labels": ["ONE COLOR OF INCOMING LIGHT", "MOLECULES SHIFT SOME OF THE LIGHT"],
     "aliases": ["c v raman", "raman effect", "raman scattering"],
     "beats": ["Shine one color of light at a molecule.", "Raman found that a little of the scattered light changes color. The shift tells us something about the molecule."],
-    "source": "https://www.nobelprize.org/prizes/themes/the-nobel-prize-in-physics-1901-2000/"
+    "source": "https://www.nobelprize.org/prizes/themes/the-nobel-prize-in-physics-1901-2000/",
+    "archive": {
+      "image": "https://upload.wikimedia.org/wikipedia/commons/e/e2/Mr._C._V._Raman_in_The_Modern_Review_Vol_15_%28January_to_June_1914%29_%28page_372_crop%29.jpg",
+      "source": "https://commons.wikimedia.org/wiki/File:Mr._C._V._Raman_in_The_Modern_Review_Vol_15_(January_to_June_1914)_(page_372_crop).jpg",
+      "credit": "C. V. Raman, The Modern Review, 1914, via Wikimedia Commons. Public-domain historical publication.",
+      "label": "C. V. RAMAN · THE MODERN REVIEW, 1914"
+    }
+  },
+  {
+    "id": "chandrasekhar-limit-hi", "category": "Space", "format": "story", "scene": "white-dwarf", "color": "#CFC7FF",
+    "language": "hi",
+    "title": "चंद्रशेखर ने तारों की कौन-सी सीमा खोजी?",
+    "labels": ["सफ़ेद बौना तारा", "सूरज के द्रव्यमान का लगभग 1.4 गुना"],
+    "aliases": ["chandrasekhar limit", "white dwarf", "subrahmanyan chandrasekhar"],
+    "beats": ["एक सफ़ेद बौना तारा कितना भारी हो सकता है?", "सुब्रह्मण्यन चंद्रशेखर ने इसकी सीमा निकाली। यह सूरज के द्रव्यमान का लगभग एक दशमलव चार गुना है।"],
+    "source": "https://science.nasa.gov/universe/glossary-3/a-g/"
   },
   {
     "id": "coral-animals", "category": "Ocean", "scene": "coral", "color": "#FF9B8D",

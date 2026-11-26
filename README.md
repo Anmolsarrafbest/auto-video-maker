@@ -16,6 +16,16 @@ python shorts.py generate --topic venus-spin --seconds 12 --offline
 
 The first two commands download open-source dependencies and three English Piper voice models, including Scottish and U.S. English narrators. The Python package supplies FFmpeg. `setup-voice` saves each pinned model card, and video descriptions credit the voice used.
 
+Topics can use `en-IN` (the installed Windows English (India) voice Microsoft Heera) or `hi` (offline eSpeak NG with Devanagari captions and Hindi YouTube metadata). Windows Indian English needs the English (India) speech pack. Hindi captions use Nirmala UI on Windows and require Noto Sans Devanagari on Linux. Choose a language for queue preparation with `--language en`, `--language en-IN`, or `--language hi`. Each episode remains a single topic in the queue.
+
+History topics can use an archival photograph from a catalogue entry in `topics.json`. The entry records the real image, its archive page, its credit, and its caption. Download the verified files once, then the renderer can use the cache offline:
+
+```powershell
+python shorts.py setup-assets --topic katherine-johnson --topic wright-first-flight
+```
+
+Run `python shorts.py setup-assets` to try all the listed archives. If a source is unavailable, the video uses its original diagram and leaves the image credit out. When footage is available, the opening photo is identified on screen, followed by the original explanatory animation. Check usage terms before adding a new archive entry.
+
 Open the printed `short.mp4` path. The same folder contains `preview.png`, `metadata.json`, and `flow-prompt.txt`. The Flow prompt is optional and can be pasted into Google Flow manually.
 
 ```powershell
@@ -100,6 +110,8 @@ For daily uploads from the approved queue, use the Windows scheduler installer w
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-publisher.ps1 -Queue -At 18:30 -Count 1 -Visibility public
 ```
+
+Start with at most one approved public Short a day. Skip days when a draft needs more work. After 10–15 releases, compare their viewer retention and decide which topics and formats merit more episodes. Keep this on your PC while the budget is zero. Archive credits, sensible pacing, and editorial review reduce risk, but there is no guaranteed strike-free cadence. [YouTube spam policy](https://support.google.com/youtube/answer/2801973)
 
 Record YouTube Studio metrics at the same age after upload so you can compare formats in `status`. Use your actual numbers:
 

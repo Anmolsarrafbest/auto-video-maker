@@ -20,8 +20,9 @@ import requests
 from filelock import FileLock, Timeout
 from google.auth.exceptions import RefreshError
 
-from production import ATTRIBUTION, VOICE_CREDITS, VOICE_SNAPSHOT, treatment
-from render import ANSWER_PAUSE, THINK_LINE, encode, narration, spoken_plan
+import archives
+from production import ATTRIBUTION, VOICE_CREDITS, VOICE_SNAPSHOT, treatment, voice_credit
+from render import ANSWER_PAUSE, encode, narration, spoken_plan, think_line
 from youtube import read_json, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
@@ -38,12 +39,29 @@ TOPIC_TAGS = {
 }
 
 
-def youtube_metadata(topic, trends=None):
+def render_treatment(topic):
+    direction = treatment(topic)
+    if "archive" in topic and archives.cache_file(topic).is_file():
+        direction["archive_source"] = topic["archive"]["source"]
+    return direction
+
+
+def configure_console():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def youtube_metadata(topic, trends=None, *, archive_used=False):
     category, related, hashtag = TOPIC_TAGS.get(
         topic["category"], ("science facts", "science education", "#ScienceFacts")
     )
     aliases = {cleaned(alias) for alias in topic["aliases"]}
-    voice = treatment(topic)["voice"]
+    direction = treatment(topic)
+    language = direction.get("language", "en")
+    source_label = "स्रोत" if language == "hi" else "Source"
+    archive = topic.get("archive") if archive_used else None
+    image_credit = f'\n\nArchival image: {archive["credit"]} {archive["source"]}' if archive else ""
     tags = {"#Shorts": None, "#ScienceShorts": None, hashtag: None}
     for terms in (trends or {}).values():
         for term in terms:
@@ -52,11 +70,11 @@ def youtube_metadata(topic, trends=None):
     return {
         "title": topic["beats"][0] if topic.get("format", "quiz") in {"quiz", "myth"} else topic["title"],
         "description": (
-            f'{topic["beats"][1]}\n\nSource: {topic["source"]}\n\n'
-            f'{VOICE_CREDITS[voice]}\n\n{" ".join(tags)}'
+            f'{topic["beats"][1]}\n\n{source_label}: {topic["source"]}{image_credit}\n\n'
+            f'{voice_credit(direction["voice"])}\n\n{" ".join(tags)}'
         ),
         "tags": list(dict.fromkeys([*topic["aliases"], category, related, "science shorts"])),
-        "language": "en",
+        "language": language,
     }
 
 
@@ -157,12 +175,18 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
     if job.exists():
         raise ValueError(f"The output directory already exists: {job}")
     beats = topic["beats"]
-    direction = treatment(topic)
-    if use_gemini:
+    direction = render_treatment(topic)
+    if use_gemini and topic.get("language") != "hi":
         try:
             beats = draft_beats(topic, seconds)
         except requests.RequestException:
             print("Gemini could not be reached. Using sourced narration.", file=sys.stderr)
+    archive_path = None
+    if "archive_source" in direction:
+        archive_path = archives.cache_file(topic)
+    elif "archive" in topic:
+        print(f"Archival photo unavailable for {topic['id']}. Using its original diagram.", file=sys.stderr)
+
     def write_audio(script):
         return narration(script, seconds, VOICE_DIR / f'{direction["voice"]}.onnx', wav, topic=topic)
 
@@ -178,19 +202,21 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             print("The Gemini narration did not fit. Using sourced narration.", file=sys.stderr)
             beats = topic["beats"]
             timings = write_audio(beats)
-        encode(topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png")
+        encode(topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png",
+               archive_path=archive_path)
         style = topic.get("format", "quiz")
         pause = ANSWER_PAUSE if style == "quiz" else .25
         transition = (
-            f'Then say "{THINK_LINE}" and wait {pause:g} seconds before revealing the answer.\n'
+            f'Then say "{think_line(topic)}" and wait {pause:g} seconds before revealing the answer.\n'
             if style == "quiz" else "Give the explanation immediately after a short natural beat.\n"
         )
         save_json(scratch / "metadata.json", {
             "topic_id": topic["id"], "selection": provenance, "duration_seconds": seconds,
-            **youtube_metadata(topic, trends),
+            **youtube_metadata(topic, trends, archive_used=archive_path is not None),
             "narration": [line for _, line, _ in spoken_plan(topic, beats)],
             "format": style, "source": topic["source"],
             "production": direction,
+            "archive": topic.get("archive") if archive_path is not None else None,
             "answer_pause_seconds": pause, "needs_review": beats != topic["beats"],
             "made_for_kids": False, "synthetic_media": False,
         })
@@ -243,7 +269,7 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
             old_description = f'{topic["title"]}.\n\nSource: {topic["source"]}\n\n{ATTRIBUTION}'
             if meta["description"] == old_description:
                 meta["description"] = defaults["description"].replace(
-                    VOICE_CREDITS[treatment(topic)["voice"]], ATTRIBUTION
+                    voice_credit(treatment(topic)["voice"]), ATTRIBUTION
                 )
             elif "#shorts" not in meta["description"].lower():
                 meta["description"] += "\n\n" + defaults["description"].split("\n\n")[-1]
@@ -257,6 +283,8 @@ def cli():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup-voice", help="Download the free Piper voice set")
+    assets = sub.add_parser("setup-assets", help="Download the verified history images")
+    assets.add_argument("--topic", action="append", help="Only fetch the selected archival topic")
     connect = sub.add_parser("connect-youtube", help="Authenticate the intended YouTube channel")
     connect.add_argument("--client", type=Path, default=CLIENT,
                          help="Path to the downloaded Google OAuth Desktop client JSON")
@@ -285,6 +313,22 @@ def cli():
 def run(args):
     if args.command == "setup-voice":
         setup_voice()
+        return
+    if args.command == "setup-assets":
+        available = {topic["id"]: topic for topic in read_json(ROOT / "topics.json") if "archive" in topic}
+        requested = args.topic or available
+        failed = []
+        for topic_id in requested:
+            if topic_id not in available:
+                raise ValueError(f"No verified archival image is listed for {topic_id}.")
+            topic = available[topic_id]
+            try:
+                print(archives.fetch(topic))
+            except (requests.RequestException, OSError, ValueError) as error:
+                failed.append(f"{topic_id}: {error}")
+        if failed:
+            raise ValueError("Some archive hosts did not supply their image. The renderer will use "
+                             "the original diagrams for those topics.\n" + "\n".join(failed))
         return
     if args.command == "connect-youtube":
         if not args.client.is_file():
@@ -356,6 +400,7 @@ def run(args):
 
 
 if __name__ == "__main__":
+    configure_console()
     args = cli()
     STATE.mkdir(exist_ok=True)
     OUTPUT.mkdir(exist_ok=True)
