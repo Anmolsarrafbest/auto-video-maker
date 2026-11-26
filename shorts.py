@@ -587,6 +587,7 @@ def cli():
     manual.add_argument("--timezone", default="Asia/Kolkata")
     both = sub.add_parser("publish-both", help="Publish existing drafts or resume a batch upload")
     both.add_argument("jobs", nargs="+", help="Exact output job folder names")
+    both.add_argument("--platform", choices=("both", "youtube", "instagram"), default="both")
     return parser.parse_args(sys.argv[1:] or ["--help"])
 
 
@@ -597,7 +598,7 @@ def run(args):
         available = {job.name: job for job in completed_jobs()}
         if any(name not in available for name in args.jobs):
             raise ValueError("Supply the exact names of existing output job folders.")
-        instagram.publish_batch([available[name] for name in dict.fromkeys(args.jobs)])
+        instagram.publish_batch([available[name] for name in dict.fromkeys(args.jobs)], args.platform)
         return
     if args.command == "setup-kokoro":
         from local_voices import setup_kokoro

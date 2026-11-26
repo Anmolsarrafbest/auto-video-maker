@@ -22,6 +22,8 @@ def request(session, method, url, **kwargs):
             code = response.json().get("error", {}).get("code")
         except ValueError:
             code = None
+        if code == 190:
+            raise ValueError("Instagram Page token expired or is invalid (Meta code 190). Run instagram_publish.py connect again.")
         raise ValueError(f"Meta request failed (HTTP {response.status_code}, API code {code}).")
     return response.json()
 
@@ -98,9 +100,32 @@ def publish(session, config, job, record, day):
     print(f"Instagram Reel published. Media ID {result['id']}.")
 
 
-def publish_batch(jobs):
-    if not shorts.has_token(shorts.TOKEN):
-        raise ValueError("Connect your YouTube channel first.")
+def publish_batch(jobs, platform="both"):
+    day = shorts.today("Asia/Kolkata")
+    failures = []
+    if platform in {"both", "youtube"}:
+        try:
+            if not shorts.has_token(shorts.TOKEN):
+                raise ValueError("Connect your YouTube channel first.")
+            occupied = sum(shorts.read_json(path).get("attempt_date") == day
+                           for path in shorts.OUTPUT.glob("*/upload.json"))
+            for job in jobs:
+                print(f"Publishing {job.name} on YouTube.", flush=True)
+                shorts.publish(job, "public", day, occupied + len(jobs), allow_reviewed=True)
+        except (ValueError, shorts.RefreshError, shorts.requests.RequestException) as error:
+            detail = str(error) if isinstance(error, ValueError) else type(error).__name__
+            failures.append(f"YouTube: {detail}")
+    if platform in {"both", "instagram"}:
+        try:
+            publish_reels(jobs, day)
+        except (ValueError, shorts.requests.RequestException) as error:
+            detail = str(error) if isinstance(error, ValueError) else type(error).__name__
+            failures.append(f"Instagram: {detail}")
+    if failures:
+        raise ValueError("\n".join(failures))
+
+
+def publish_reels(jobs, day):
     if not CONFIG.is_file():
         raise ValueError("Connect your Instagram Creator account first.")
     config = shorts.read_json(CONFIG)
@@ -109,17 +134,13 @@ def publish_batch(jobs):
         raise ValueError("The Instagram Page token is missing.")
     for job in jobs:
         caption(job)
-    day = shorts.today("Asia/Kolkata")
-    occupied = sum(shorts.read_json(path).get("attempt_date") == day
-                   for path in shorts.OUTPUT.glob("*/upload.json"))
     with shorts.requests.Session() as session:
         session.headers["Authorization"] = f"Bearer {config['token']}"
         profile = account(session, config["account_id"])
         if profile["id"] != config["account_id"] or profile["username"].casefold() != config["username"].casefold():
             raise ValueError("The Instagram token resolved to a different account.")
         for job in jobs:
-            print(f"Publishing {job.name} on both platforms.", flush=True)
-            shorts.publish(job, "public", day, occupied + len(jobs), allow_reviewed=True)
+            print(f"Publishing {job.name} on Instagram.", flush=True)
             path = job / "instagram.json"
             record = shorts.read_json(path) if path.is_file() else {
                 "account_id": config["account_id"], "review": queue_publish.review_signature(job)

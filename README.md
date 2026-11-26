@@ -116,6 +116,8 @@ python shorts.py generate --discover --count 5 --publish-both
 
 Leave off `--publish-both` to review drafts first. Publish or resume exact
 drafts later with `python shorts.py publish-both JOB_FOLDER [JOB_FOLDER ...]`.
+Use `--platform youtube` or `--platform instagram` to retry only one
+destination. If Meta returns code 190, reconnect with a fresh Page token.
 The Instagram caption uses up to five distinct hashtags, including a relevant
 matched Google trend when present and topic-specific tags. Google Trends
 matches are signals from search, and the app does not measure Instagram
