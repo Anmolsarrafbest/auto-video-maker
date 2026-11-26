@@ -1,6 +1,28 @@
 # Auto Video Maker
 
-Generate 12-, 15-, or 20-second vertical science Shorts with original animated illustrations, Piper narration, and captions. Draft generation works without a Gemini key or a YouTube account. Uploading uses the free YouTube Data API after you connect your channel.
+## How the Shorts pipeline works
+
+```mermaid
+flowchart TD
+    A["Choose a topic from the sourced catalogue or Google Trends"] --> B["Load verified facts and cached, credited archive media"]
+    R["Optional research with NASA and YouTube search"] -.-> B
+    B --> C{"Gemini episode planner enabled?"}
+    C -->|Yes| D["One Gemini request returns narration, shot direction, archive cut, motion and sound choices"]
+    C -->|No or unavailable| E["Use catalogue narration and the built-in storyboard"]
+    D --> F["Synthesize narration and measure speech timing"]
+    E --> F
+    F --> G["Piper or Windows speech plus original music and timed sound effects"]
+    F --> H["Pillow draws captions and motion graphics, and places archival media"]
+    M["Manim draws the rainbow diagram on CPU when installed"] --> H
+    G --> I["FFmpeg combines audio and visuals into a vertical MP4"]
+    H --> I
+    I --> J["Local draft with preview, metadata, research prompt and Flow prompt"]
+    J --> K["Review the result and approve it for queue publishing"]
+    K --> L["YouTube Data API uploads or schedules the Short"]
+    J -.-> N["Optional manual use of the shot prompt in Google Flow"]
+```
+
+Generate vertical science Shorts with an episode-specific duration and shot plan. Use `--seconds` to override the default (10, 12, 15, 18, 20, or 25), provided the script fits. Draft generation works without a Gemini key or a YouTube account. Uploading uses the free YouTube Data API after you connect your channel.
 
 Quiz Shorts ask a question, say “Think about it,” then wait 1.5 seconds. Science-history stories, myth checks, and visual demonstrations use different timing. Archive, laboratory, observatory, and ocean treatments use different palettes and custom illustrations. The app selects one of three local Piper voices and composes an instrumental score for each episode. The exported Flow prompt and upload metadata record the selected treatment and narration credit.
 
@@ -16,7 +38,20 @@ python shorts.py generate --topic venus-spin --seconds 12 --offline
 
 The first two commands download open-source dependencies and three English Piper voice models, including Scottish and U.S. English narrators. The Python package supplies FFmpeg. `setup-voice` saves each pinned model card, and video descriptions credit the voice used.
 
-Topics can use `en-IN` (the installed Windows English (India) voice Microsoft Heera) or `hi` (offline eSpeak NG with Devanagari captions and Hindi YouTube metadata). Windows Indian English needs the English (India) speech pack. Hindi captions use Nirmala UI on Windows and require Noto Sans Devanagari on Linux. Choose a language for queue preparation with `--language en`, `--language en-IN`, or `--language hi`. Each episode remains a single topic in the queue.
+Topics can use `en-IN` with the installed Windows English (India) voice Microsoft Heera. Hindi production is paused. The recorded-narration and Devanagari caption support is retained for later.
+
+Run `python shorts.py setup-footage` to cache the reviewed lunar and Mars assets. The Moon episode uses a credited NASA SVS turntable followed by an original 3D-projected diagram. The Mars episode opens with an edited camera sequence from Curiosity, followed by an original explanation. The storyboard export includes shot timing, framing, narration timing, and factual constraints for Flow. The renderer can run offline after asset setup.
+
+### Free research before rendering
+
+```powershell
+python research.py brief mars-sunset
+python research.py nasa "Mars sunset" --limit 5
+python research.py youtube "Mars blue sunset" --region IN --days 90
+python shorts.py generate --offline --topic mars-sunset
+```
+
+The brief estimates pacing from the script. NASA search lists candidate archive pages without a key. Review each asset's credit and terms before adding it to the renderer's footage catalogue. YouTube search uses the existing Google sign-in or an optional `YOUTUBE_API_KEY` and displays public titles, dates, and view counts without downloading creator footage. The results are short-duration matches and can include regular videos. US and India can be queried separately. No paid research service is required.
 
 History topics can use an archival photograph from a catalogue entry in `topics.json`. The entry records the real image, its archive page, its credit, and its caption. Download the verified files once, then the renderer can use the cache offline:
 
@@ -139,3 +174,16 @@ python instagram_publish.py publish-next
 ```
 
 Enter the Page token at the hidden prompt. The token stays in the ignored `secrets/instagram.json` file. Review the video in the local queue first, then approve it explicitly for Instagram. `publish-next` can publish one approved Reel per India calendar day. It publishes immediately when Meta finishes processing. Start with one manual test, then use Windows Task Scheduler to run `python.exe` with the absolute path to `instagram_publish.py` and argument `publish-next`. Use the project folder for **Start in**. The PC must be on and signed in. If an earlier publish has an uncertain outcome, reconcile it on the Instagram profile before changing the local receipt.
+# Optional Manim science diagrams
+
+Install Manim Community to use a CPU-rendered animation for the rainbow Short.
+The main renderer adds the diagram at the narration reveal and keeps the existing
+captions, music, sound cues, and end card.
+
+```powershell
+python -m pip install manim==0.22.1
+python shorts.py generate --topic rainbow-split --offline
+```
+
+The job's `metadata.json` records the diagram renderer. The rainbow uses the
+built-in illustration when Manim is absent. Other topics use their existing visuals.

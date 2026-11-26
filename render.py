@@ -3,7 +3,8 @@
 import math
 from array import array
 from bisect import bisect_right
-from contextlib import ExitStack
+from functools import lru_cache
+from importlib.util import find_spec
 import os
 import random
 import re
@@ -13,21 +14,27 @@ import wave
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
 
 from hindi_captions import ass_filter
-from local_voices import HindiSpeech, windows_pcm
+from local_voices import windows_pcm
 from production import HINDI, INDIAN_ENGLISH, treatment
+from storyboard import CLIPS, episode
+import footage
 
-WIDTH, HEIGHT, FPS = 720, 1280, 24
-THINK_LINE = "Think about it."
+WIDTH, HEIGHT, FPS = 720, 1280, 30
+END_CARD = "Follow and subscribe"
 ANSWER_PAUSE = 1.5
 PALETTES = {
     "observatory": ((9, 14, 29), (10, 12, 21), "#405273", "#0D1527", 30),
     "archive": ((27, 19, 20), (25, 17, 12), "#705040", "#251B1B", 8),
     "lab": ((8, 26, 26), (9, 20, 15), "#376761", "#102824", 13),
     "ocean": ((6, 20, 34), (6, 28, 29), "#37657B", "#0B2537", 42),
+    "copper": ((37, 20, 16), (66, 36, 23), "#C68458", "#44271C", 10),
+    "paper": ((52, 36, 32), (89, 67, 49), "#C9A880", "#49362B", 4),
 }
 
 # Each arrangement has its own chord progression, phrasing and instruments.
 SCORES = {
+    "orbital groove": (.46, ((38, 57, 60, 65, 69), (46, 57, 62, 65, 69),
+                             (41, 57, 60, 64, 69), (43, 55, 62, 65, 70)), (0, 2, 3, 1), .8, 1),
     "ambient synth": (.72, ((45, 57, 60, 64, 71), (41, 53, 60, 64, 67),
                            (48, 60, 64, 67, 74), (43, 55, 62, 69, 71)), (0, 2, 1, 3), .35, .75),
     "felt piano": (.81, ((48, 60, 64, 67, 71), (45, 57, 60, 64, 69),
@@ -46,20 +53,27 @@ DELIVERY = {
 
 
 def think_line(topic):
-    return "ज़रा सोचिए।" if topic.get("language") == "hi" else THINK_LINE
+    prompts = ("Think about it.", "Take a guess.", "What’s your hunch?", "Any guesses?")
+    return random.Random(topic.get("id", "") + ":prompt").choice(prompts)
 
 
 def spoken_plan(topic, beats):
     """Share the audio and caption schedule for a topic's editorial format."""
     style = topic.get("format", "quiz")
-    plan = [("hook", beats[0], .14)]
-    if style == "quiz":
+    # A stable choice keeps the audio, captions and export in sync.
+    natural = topic.get("id") == "jupiter-spin" or (
+        style in {"quiz", "myth"} and random.Random(topic.get("id", "") + ":hook").random() < .4
+    )
+    episode_plan = topic.get("episode_plan")
+    plan = [] if natural and not episode_plan else [("hook", beats[0], .14)]
+    question = episode_plan["opening"] == "question" if episode_plan else style == "quiz" and not natural
+    if question:
         plan.append(("pause", think_line(topic), .18))
     parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+|(?<=।)\s+", beats[1])
     # Keep brief replies such as “No.” attached to the explanation.
     if len(parts) > 1 and len(parts[0].split()) < 4:
         parts[:2] = [" ".join(parts[:2])]
-    reveal_gap = ANSWER_PAUSE if style == "quiz" else .25
+    reveal_gap = ANSWER_PAUSE if question else .25
     return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
 
 
@@ -75,6 +89,12 @@ def font(size, bold=False, serif=False):
     return ImageFont.load_default(size=size)
 
 
+def motion_cues(topic, beats, timings, seconds):
+    reveal = next(start for (role, _, _), (start, _) in zip(spoken_plan(topic, beats), timings)
+                  if role == "answer")
+    return (reveal, seconds - 2)
+
+
 def wrap(text, face, width):
     lines = [""]
     for word in text.split():
@@ -88,6 +108,26 @@ def wrap(text, face, width):
 
 def circle(draw, x, y, radius, fill=None, outline=None, width=1):
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill, outline, width)
+
+
+@lru_cache(maxsize=72)
+def lunar_sphere(phase):
+    """Project a lit, rotating procedural sphere. This is a diagram, not a lunar map."""
+    image = Image.new("RGBA", (84, 84))
+    pixels = image.load()
+    for row in range(84):
+        ny = (row - 41.5) / 40
+        for column in range(84):
+            nx = (column - 41.5) / 40
+            radius_squared = nx * nx + ny * ny
+            if radius_squared <= 1:
+                nz = math.sqrt(1 - radius_squared)
+                longitude = math.atan2(nx, nz) + phase * .08
+                texture = 10 * math.sin(longitude * 8 + ny * 9) + 5 * math.cos(longitude * 19 - ny * 16)
+                illumination = max(0, -.56 * nx - .28 * ny + .76 * nz)
+                gray = round(52 + 156 * illumination + texture)
+                pixels[column, row] = (gray, gray, min(255, gray + 11), 255)
+    return image
 
 
 def illustration(draw, scene, accent, time, beat):
@@ -247,7 +287,7 @@ def illustration(draw, scene, accent, time, beat):
                       fill=color, width=3)
 
 
-def frames(topic, beats, timings, seconds, archive_path=None):
+def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=()):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
     base, tint, border, caption_fill, radius = PALETTES[theme]
@@ -275,21 +315,22 @@ def frames(topic, beats, timings, seconds, archive_path=None):
         for _ in range(64):
             x, y = rng.randrange(62, 641), rng.randrange(336, 752)
             circle(draw, x, y, rng.choice((1, 1, 2)), "#465677")
-    draw.rounded_rectangle((53, 323, 643, 756), radius=radius, outline=border, width=2)
     hindi = topic.get("language") == "hi"
     if not hindi:
         draw.text((58, 140), topic["category"].upper(), font=font(25, True), fill=accent)
-    headline = font(53, True, serif=theme == "archive")
-    if wrap(beats[0], headline, 576).count("\n") > 1:
+    plan = spoken_plan(topic, beats)
+    heading = beats[0] if plan[0][0] == "hook" else topic["title"]
+    headline = font(53, True, serif=theme in {"archive", "paper", "copper"})
+    if wrap(heading, headline, 576).count("\n") > 1:
         headline = font(42, True, serif=theme == "archive")
     if not hindi:
-        draw.multiline_text((55, 184), wrap(beats[0], headline, 576), font=headline,
+        draw.multiline_text((55, 184), wrap(heading, headline, 576), font=headline,
                             fill="#F7F3EA", spacing=2)
     photograph = None
     if archive_path:
         with Image.open(archive_path) as source:
             photograph = ImageOps.contain(source.convert("RGB"), (535, 342))
-    plan = spoken_plan(topic, beats)
+    layout = episode(topic)[1]
     starts = [start for start, _ in timings]
     captions = []
     for role, text, _ in plan:
@@ -298,33 +339,108 @@ def frames(topic, beats, timings, seconds, archive_path=None):
             face = font(34, True)
         captions.append((wrap(text, face, 526) if role != "hook" else "", face))
     label_font = font(23, True)
+    reveal, outro = motion_cues(topic, beats, timings, seconds)
+    recap_start = timings[-1][1] + .15
+    recap_steps = ("Light bends as it enters", "It reflects once inside",
+                   "The colors exit at different angles")
+    motion = topic.get("episode_plan", {}).get("motion", "underline")
     for index in range(seconds * FPS):
         time = index / FPS
+        recap = time >= recap_start
+        replay = bool(diagram) and outro - recap_start >= 2.4 and recap
+        replay_progress = min(1, max(0, (time - recap_start) / max(.1, outro - recap_start)))
         part = max(0, bisect_right(starts, time) - 1)
         beat = int(plan[part][0] == "answer")
         img = background.copy()
         draw = ImageDraw.Draw(img)
-        if photograph is not None and not beat:
+        archive_shot = time < seconds * topic.get("archive_fraction", .73)
+        if clip and archive_shot:
+            archive_duration = seconds * topic.get("archive_fraction", .73)
+            # Spread sparse camera observations across the shot in chronological order.
+            frame = int(time * len(clip) / archive_duration) if topic["id"] in {"mars-sunset", "jupiter-spin"} else index
+            img.paste(clip[min(len(clip) - 1, frame)], (60, 370))
+            draw.text((348, 714), CLIPS[topic["id"]]["label"], font=font(20, True), fill=accent, anchor="mm")
+        elif photograph is not None and archive_shot:
             img.paste(photograph, ((696 - photograph.width) // 2, 341 + (342 - photograph.height) // 2))
             draw.text((348, 714), topic["archive"]["label"], font=font(20, True), fill=accent, anchor="mm")
+        elif diagram and beat:
+            diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
+            if replay:
+                diagram_frame = round(replay_progress * (len(diagram) - 1))
+            shot = diagram[diagram_frame]
+            drift = min(1, max(0, (time - reveal) / max(1, seconds - reveal)))
+            width = WIDTH + round(32 * drift)
+            shot = shot.resize((width, round(456 * width / WIDTH)), Image.Resampling.BILINEAR)
+            img.paste(shot, ((WIDTH - width) // 2, 300 - (shot.height - 456) // 2))
         else:
-            illustration(draw, topic["scene"], accent, time, beat)
-        if beat and not hindi:
+            if layout in {"space film", "experiment"}:
+                stage = Image.new("RGB", (WIDTH, HEIGHT), base)
+                illustration(ImageDraw.Draw(stage), topic["scene"], accent, time, beat)
+                if topic["scene"] == "distance":
+                    moon = lunar_sphere(time * 4)
+                    offset = 30 * (1 - math.cos(time * .4))
+                    stage.paste(moon, (round(477 + offset) - 42, 500), moon)
+                push_start = min(recap_start, seconds - 3)
+                progress = min(1, max(0, (time - push_start) / max(1.2, outro - push_start)))
+                ease = progress * progress * (3 - 2 * progress)
+                wide = (62, 364 if beat else 315, 645, 715 if beat else 750)
+                bounds = tuple(round(a + (b - a) * ease) for a, b in zip(wide, (96, 384, 625, 689)))
+                shot = stage.crop(bounds)
+                shot = ImageOps.fit(shot, (720, 490))
+                img.paste(shot, (0, 313 if layout == "space film" else 330))
+            else:
+                stage = Image.new("RGB", (WIDTH, HEIGHT), base)
+                illustration(ImageDraw.Draw(stage), topic["scene"], accent, time, beat)
+                shot = ImageOps.fit(stage.crop((54, 319, 646, 752)), (WIDTH, 490))
+                img.paste(shot, (0, 306))
+        if beat and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 550 else font(20, True),
                       fill=accent, anchor="mm")
+            if topic["scene"] == "distance":
+                draw.text((348, 755), "ILLUSTRATION · NOT TO SCALE", font=font(17, True), fill=accent, anchor="mm")
         caption, face = captions[part]
+        if recap:
+            face = font(35, True)
+            takeaway = topic["labels"][1]
+            if replay:
+                step = bisect_right((1.4, 2.2), diagram_frame / FPS)
+                takeaway = recap_steps[step]
+            caption = wrap(takeaway, face, 526)
         if caption:
-            draw.rounded_rectangle((54, 811, 642, 1029), radius=radius, fill=caption_fill, outline=border, width=2)
+            if layout in {"space film", "experiment"} and not hindi:
+                draw.rectangle((53, 862, 60, 1039), fill=accent)
+            else:
+                draw.rounded_rectangle((54, 845, 642, 1063), radius=radius, fill=caption_fill, outline=border, width=2)
             if not hindi:
-                draw.multiline_text((348, 916), caption, font=face,
+                draw.multiline_text((348, 950), caption, font=face,
                                     fill="#F7F3EA", anchor="mm", align="center", spacing=7)
-        draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill=border)
-        draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
+        if layout == "magazine":
+            draw.rounded_rectangle((57, 1054, 639, 1060), radius=3, fill=border)
+            draw.rectangle((57, 1054, 57 + 582 * (index + 1) / (seconds * FPS), 1060), fill=accent)
+        if reveal <= time < reveal + .9 and not hindi:
+            progress = min(1, (time - reveal) / .4)
+            span = round(185 * (1 - (1 - progress) ** 3))
+            if motion == "pulse":
+                radius = 4 + round(19 * progress)
+                draw.ellipse((360 - radius, 790 - radius, 360 + radius, 790 + radius),
+                             outline=accent, width=3)
+            elif motion == "brackets":
+                for side in (-1, 1):
+                    x = 360 + side * (245 - span / 5)
+                    draw.line(((x + side * 24, 776), (x, 776), (x, 803),
+                               (x + side * 24, 803)), fill=accent, width=3)
+            else:
+                draw.line((360 - span, 791, 360 + span, 791), fill=accent, width=3)
+        if time >= outro:
+            progress = min(1, (time - outro) / .35)
+            y = 1090 + round(18 * (1 - progress) ** 3)
+            draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
+            draw.text((360, y + 30), END_CARD, font=font(27, True), fill="#F7F3EA", anchor="mm")
         yield img
 
 
-def mix_music(audio, rate, timings, topic):
+def mix_music(audio, rate, timings, topic, cues):
     """Compose an original background score around the episode's delivery."""
     samples = array("h")
     samples.frombytes(audio)
@@ -337,6 +453,10 @@ def mix_music(audio, rate, timings, topic):
     beat_length *= random_noise.uniform(.91, 1.09)
     bar_length = beat_length * 4
     chords = [tuple(440 * 2 ** ((note + key - 69) / 12) for note in chord) for chord in progression]
+    sound = topic.get("episode_plan", {}).get("sound", "sweep")
+    pitch, glide, decay = {"pop": (155, 80, 25), "sweep": (220, 180, 14),
+                           "chime": (520, 35, 10)}[sound]
+    effects_plan = ((cues[0], pitch, glide, decay, 1350), (cues[1], 420, 180, 14, 1000))
     for index, speech in enumerate(samples):
         time = index / rate
         bar = time % bar_length
@@ -366,8 +486,34 @@ def mix_music(audio, rate, timings, topic):
         distance = min(max(start - time, time - end, 0) for start, end in timings)
         duck = .53 + .47 * min(1, distance / .14)
         fade = min(1, (time + .03) * 8, (len(samples) - index) / (.38 * rate))
-        music = pad + bass + percussion * (kick + brush) + keys
-        mixed = round(speech * .76 + 1.45 * fade * duck * music)
+        if score == "felt piano":
+            hammer = math.sin(angle) + .22 * math.sin(2.01 * angle) + .10 * math.sin(4.03 * angle)
+            arpeggio = tones[(int(bar * 2 / beat_length) + inversion) % len(tones)]
+            piano = 1450 * hammer * min(1, pulse * 110) * math.exp(-pulse * 4.6)
+            resonance = 460 * math.sin(math.tau * arpeggio * time) * chord_fade
+            music = piano + resonance + .24 * pad
+        elif score == "ambient synth":
+            swell = .55 + .45 * math.sin(math.tau * (bar / bar_length - .25))
+            drone = 1200 * math.sin(math.tau * root * time) * chord_fade
+            music = pad * swell + drone + .3 * keys
+        elif score == "slow instrumental swell":
+            wash = .48 + .52 * math.sin(time * .8) ** 2
+            music = pad * wash + .48 * bass + .25 * brush + .8 * keys
+        else:
+            music = .30 * pad + bass + percussion * (kick + brush) + 1.2 * keys
+        if score == "orbital groove":
+            offbeat = (bar + beat_length / 2) % beat_length
+            pluck = math.sin(math.tau * note * offbeat) * math.exp(-offbeat * 8)
+            music += 650 * pluck * min(1, offbeat * 100) + .35 * pad
+        effects = 0
+        for onset, pitch, glide, decay, gain in effects_plan:
+            elapsed = time - onset
+            if 0 <= elapsed < .32:
+                sweep = pitch * elapsed + glide * elapsed ** 2
+                effects += gain * min(1, elapsed * 180) * math.exp(-elapsed * decay) * (
+                    math.sin(math.tau * sweep) + .24 * math.sin(math.tau * sweep * 2)
+                )
+        mixed = round(speech * .76 + fade * (1.55 * duck * music + effects))
         samples[index] = max(-32768, min(32767, mixed))
     return samples.tobytes()
 
@@ -378,37 +524,44 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     gaps = [gap for _, _, gap in plan]
     direction = treatment(topic)
     speed, expression, rhythm = DELIVERY[direction["delivery"]]
-    with ExitStack() as stack:
-        if direction["voice"] == HINDI:
-            hindi = stack.enter_context(HindiSpeech())
-        elif direction["voice"] != INDIAN_ENGLISH:
+    def fit_narration():
+        if direction["voice"] not in {HINDI, INDIAN_ENGLISH}:
             from piper import PiperVoice, SynthesisConfig
 
             if not voice_path.is_file():
                 raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
             voice = PiperVoice.load(voice_path)
 
-        def synthesize(role, line, pace):
+        def synthesize(index, role, line, pace):
             length = pace * speed * (1.06 if role == "pause" else 1)
             if direction["voice"] == HINDI:
-                return hindi.synthesize(line, 1 / length)
+                recording = voice_path.parent.parent / "voiceovers" / topic["id"] / f"{index:02}.wav"
+                if not recording.is_file():
+                    raise ValueError(f"Record the spoken line as {recording} before rendering Hindi.")
+                with wave.open(str(recording), "rb") as wav:
+                    if wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+                        raise ValueError("Use mono, 16-bit PCM WAV recordings.")
+                    return wav.getframerate(), wav.readframes(wav.getnframes())
             if direction["voice"] == INDIAN_ENGLISH:
                 return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
-            config = SynthesisConfig(length_scale=length, noise_scale=expression, noise_w_scale=rhythm,
+            if role == "hook":
+                length *= .96
+            config = SynthesisConfig(length_scale=length, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
                                      volume=.90 if role == "pause" else 1)
             chunks = voice.synthesize(line, syn_config=config)
             return voice.config.sample_rate, b"".join(chunk.audio_int16_bytes for chunk in chunks)
 
-        for pace in (1, .92, .84, .76):
-            rates, clips = zip(*(synthesize(role, line, pace) for role, line, _ in plan))
+        for pace in ((1,) if direction["voice"] == HINDI else (1, .92, .84, .76)):
+            rates, clips = zip(*(synthesize(i, role, line, pace)
+                                 for i, (role, line, _) in enumerate(plan, 1)))
             rate = rates[0]
             if any(value != rate for value in rates):
                 raise ValueError("Narration chunks have inconsistent sample rates.")
             if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
-                break
-        else:
-            raise ValueError("Narration does not fit the selected duration. Try a longer duration.")
+                return rate, clips
+        raise ValueError("Narration does not fit the selected duration. Try a longer duration.")
 
+    rate, clips = fit_narration()
     audio = bytearray(2 * rate * seconds)
     timings = []
     end = 0
@@ -419,14 +572,24 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
         timings.append((start / rate, end / rate))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        wav.writeframes(mix_music(audio, rate, timings, topic))
+        wav.writeframes(mix_music(audio, rate, timings, topic, motion_cues(topic, beats, timings, seconds)))
     return timings
 
 
-def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *, archive_path=None):
+def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *, archive_path=None, use_clip=False):
     import imageio_ffmpeg
 
     ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
+    clip = footage.decode(ffmpeg, topic["id"], FPS) if use_clip else ()
+    if use_clip and not clip:
+        raise ValueError("The reviewed footage did not decode. Check the cached file.")
+    diagram = ()
+    if topic["id"] == "rainbow-split" and find_spec("manim") is not None:
+        from manim_diagrams import render_rainbow
+
+        diagram = footage.decode_frames(ffmpeg, render_rainbow(wav_path.parent, FPS), FPS)
+        if not diagram:
+            raise ValueError("The Manim diagram did not decode.")
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{WIDTH}x{HEIGHT}",
            "-framerate", str(FPS), "-i", "-", "-i", str(wav_path), "-map", "0:v", "-map", "1:a"]
@@ -438,7 +601,7 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     )
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, cwd=wav_path.parent) as process:
         try:
-            for index, image in enumerate(frames(topic, beats, timings, seconds, archive_path)):
+            for index, image in enumerate(frames(topic, beats, timings, seconds, archive_path, clip, diagram)):
                 if poster and index == FPS and not hindi:
                     image.save(poster)
                 process.stdin.write(image.tobytes())
@@ -451,3 +614,4 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     if poster and hindi:
         subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "1",
                         "-i", str(destination), "-frames:v", "1", str(poster)], check=True)
+    return "manim" if diagram else "pillow"

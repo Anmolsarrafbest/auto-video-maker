@@ -21,14 +21,17 @@ from filelock import FileLock, Timeout
 from google.auth.exceptions import RefreshError
 
 import archives
+import footage
 from production import ATTRIBUTION, VOICE_CREDITS, VOICE_SNAPSHOT, treatment, voice_credit
-from render import ANSWER_PAUSE, encode, narration, spoken_plan, think_line
+from render import encode, narration, spoken_plan
+from storyboard import CLIPS, DURATIONS, episode, flow_prompt
 from youtube import read_json, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
 STATE = ROOT / "state"
 VOICE_DIR = ROOT / "voices"
 TOKEN = ROOT / "secrets" / "youtube-token.json"
+PAUSED_LANGUAGES = {"hi"}
 CLIENT = ROOT / "secrets" / "youtube-client.json"
 VOICE_BASE = f"https://huggingface.co/rhasspy/piper-voices/resolve/{VOICE_SNAPSHOT}/en"
 TOPIC_TAGS = {
@@ -37,10 +40,16 @@ TOPIC_TAGS = {
     "Physics": ("physics", "everyday science", "#Physics"),
     "History": ("history of science", "science biographies", "#ScienceHistory"),
 }
+GEMINI_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
+)
 
 
 def render_treatment(topic):
     direction = treatment(topic)
+    direction.update(layout=episode(topic)[1], production_revision=2)
+    if topic["id"] in CLIPS and footage.cache_file(topic["id"]).is_file():
+        direction["clip_source"] = CLIPS[topic["id"]]["source"]
     if "archive" in topic and archives.cache_file(topic).is_file():
         direction["archive_source"] = topic["archive"]["source"]
     return direction
@@ -115,7 +124,7 @@ def draft_beats(topic, seconds):
     opener = ("Start with a 4 to 9 word question ending in a question mark." if quiz else
               "Start with a brief factual or visual hook matching the supplied opening.")
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+        GEMINI_ENDPOINT,
         headers={"x-goog-api-key": key},
         json={
             "contents": [{"parts": [{"text": (
@@ -171,12 +180,106 @@ def completed_jobs():
                   if (path.parent / "short.mp4").is_file())
 
 
-def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None):
+def plan_shots(provider, brief):
+    instruction = ("Act as a documentary editor. Given the locked brief below, return JSON "
+                   "with archive_fraction (number 0.60 to 0.85, the cut from archive to diagram) "
+                   "and direction (one concrete composition and transition suggestion, up to 400 characters). "
+                   "Use only the supplied subjects and sources. Preserve narration and dates.\n" + brief)
+    if provider == "ollama":
+        response = requests.post("http://127.0.0.1:11434/api/generate", json={
+            "model": os.getenv("SHORTS_LOCAL_MODEL", "gemma3:4b"), "stream": False,
+            "prompt": instruction, "format": "json"}, timeout=90)
+        response.raise_for_status()
+        raw = response.json()["response"]
+    else:
+        key = os.getenv("GEMINI_FREE_API_KEY", "").strip()
+        if not key:
+            raise ValueError("Missing free-tier key")
+        response = requests.post(
+            GEMINI_ENDPOINT,
+            headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": instruction}]}],
+            "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+        response.raise_for_status()
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    result = json.loads(raw)
+    fraction, note = result["archive_fraction"], result["direction"]
+    if not isinstance(fraction, (int, float)) or not .60 <= fraction <= .85 or not isinstance(note, str) or not 1 <= len(note.strip()) <= 400:
+        raise ValueError("Invalid shot plan")
+    return fraction, note.strip()
+
+
+def gemini_episode(topic, seconds, assets):
+    key = os.getenv("GEMINI_FREE_API_KEY", "").strip()
+    if not key:
+        raise ValueError("GEMINI_FREE_API_KEY is empty in this PowerShell session")
+    fields = {
+        "hook": {"type": "STRING"},
+        "explanation": {"type": "STRING"},
+        "opening": {"type": "STRING", "enum": ["statement", "question"]},
+        "archive_fraction": {"type": "NUMBER"},
+        "motion": {"type": "STRING", "enum": ["brackets", "underline", "pulse"]},
+        "sound": {"type": "STRING", "enum": ["pop", "sweep", "chime"]},
+        "direction": {"type": "STRING"},
+    }
+    context = {key: topic[key] for key in ("title", "beats", "source")}
+    context["available_archive"] = assets
+    instruction = (
+        f"Plan one {seconds}-second documentary Short in English. Treat the supplied beats as facts. "
+        "Preserve their meaning and numbers. Avoid adding any unverified facts, names or assets. "
+        "Use one natural sentence or one short question as the hook, then a concise explanation "
+        "that adds information without repeating the hook. Prefer a statement for a visual demonstration. "
+        f"Keep the combined script under {int(seconds * 2.1)} words. "
+        "Select a motion graphic and sound for the explanation reveal. "
+        "Set archive_fraction between 0.60 and 0.85 and write a specific shot prompt under 400 characters. "
+        "Leave the final two seconds available for the end overlay.\n" + json.dumps(context)
+    )
+    response = requests.post(
+        GEMINI_ENDPOINT, headers={"x-goog-api-key": key}, timeout=30,
+        json={"contents": [{"parts": [{"text": instruction}]}],
+              "generationConfig": {"responseMimeType": "application/json",
+                                   "responseSchema": {"type": "OBJECT", "properties": fields,
+                                                      "required": list(fields)}}},
+    )
+    response.raise_for_status()
+    parts = response.json()["candidates"][0]["content"]["parts"]
+    plan = json.loads("".join(part["text"] for part in parts if not part.get("thought")))
+    for name, field in fields.items():
+        value = plan[name]
+        if field["type"] == "STRING":
+            if not isinstance(value, str) or not value.strip() or len(value) > 400:
+                raise ValueError("Invalid plan text")
+            if "enum" in field and value not in field["enum"]:
+                raise ValueError("Invalid plan option")
+    fraction = plan["archive_fraction"]
+    if not isinstance(fraction, (int, float)) or not .60 <= fraction <= .85:
+        raise ValueError("Invalid archive timing")
+    if (plan["opening"] == "question") != plan["hook"].strip().endswith("?"):
+        raise ValueError("Opening does not match its format")
+    return plan
+
+
+def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None, planner=None):
+    if topic.get("language") in PAUSED_LANGUAGES:
+        raise ValueError("Hindi production is paused. Choose an English topic for now.")
     if job.exists():
         raise ValueError(f"The output directory already exists: {job}")
     beats = topic["beats"]
     direction = render_treatment(topic)
-    if use_gemini and topic.get("language") != "hi":
+    seconds = seconds or episode(topic)[0]
+    episode_plan = None
+    if planner == "gemini":
+        assets = {name: direction[name] for name in ("clip_source", "archive_source") if name in direction}
+        try:
+            episode_plan = gemini_episode(topic, seconds, assets)
+            beats = [episode_plan["hook"], episode_plan["explanation"]]
+            topic = dict(topic, episode_plan=episode_plan, archive_fraction=episode_plan["archive_fraction"])
+        except (ValueError, KeyError, TypeError, IndexError, requests.RequestException) as error:
+            response = getattr(error, "response", None)
+            reason = f"HTTP {response.status_code}" if response is not None else type(error).__name__
+            if not os.getenv("GEMINI_FREE_API_KEY", "").strip():
+                reason = "GEMINI_FREE_API_KEY is empty"
+            print(f"Gemini episode plan unavailable ({reason}). Using the built-in plan.", file=sys.stderr)
+    elif use_gemini and topic.get("language") != "hi":
         try:
             beats = draft_beats(topic, seconds)
         except requests.RequestException:
@@ -197,41 +300,78 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         try:
             timings = write_audio(beats)
         except ValueError:
-            if beats == topic["beats"]:
+            if beats == topic["beats"] and not episode_plan:
                 raise
             print("The Gemini narration did not fit. Using sourced narration.", file=sys.stderr)
             beats = topic["beats"]
+            if episode_plan:
+                topic = {key: value for key, value in topic.items()
+                         if key not in {"episode_plan", "archive_fraction"}}
+                episode_plan = None
             timings = write_audio(beats)
-        encode(topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png",
-               archive_path=archive_path)
-        style = topic.get("format", "quiz")
-        pause = ANSWER_PAUSE if style == "quiz" else .25
-        transition = (
-            f'Then say "{think_line(topic)}" and wait {pause:g} seconds before revealing the answer.\n'
-            if style == "quiz" else "Give the explanation immediately after a short natural beat.\n"
+        brief = flow_prompt(topic, timings, seconds, spoken_plan(topic, beats), "clip_source" in direction)
+        if archive_path:
+            brief += f'Available photograph: {topic["archive"]["credit"]}\n'
+        if episode_plan:
+            direction["planner"] = "gemini"
+            direction["episode_plan"] = episode_plan
+            brief += f'Editor suggestion: {episode_plan["direction"]}\n'
+            brief += f'Reveal graphic: {episode_plan["motion"]}. Reveal sound: {episode_plan["sound"]}.\n'
+            print("Using one Gemini plan for narration, shots, motion and sound.")
+        if planner == "ollama":
+            try:
+                fraction, note = plan_shots(planner, brief)
+                topic = dict(topic, archive_fraction=fraction)
+                direction.update(planner=planner, archive_fraction=fraction)
+                brief += f"Editor suggestion: {note}\n"
+            except (ValueError, KeyError, TypeError, IndexError, requests.RequestException) as error:
+                response = getattr(error, "response", None)
+                if response is not None:
+                    reason = f"HTTP {response.status_code}"
+                elif isinstance(error, requests.RequestException):
+                    reason = type(error).__name__
+                elif planner == "gemini" and not os.getenv("GEMINI_FREE_API_KEY", "").strip():
+                    reason = "GEMINI_FREE_API_KEY is empty in this PowerShell session"
+                else:
+                    reason = "the model returned an invalid or incomplete shot plan"
+                print(f"{planner} shot planner unavailable ({reason}). Using the built-in shot plan.",
+                      file=sys.stderr)
+        if archive_path or "clip_source" in direction:
+            brief += f'Use the credited archive until {seconds * topic.get("archive_fraction", .73):.2f}s, then cut to the explanation.\n'
+        direction["diagram_renderer"] = encode(
+            topic, beats, timings, seconds, wav, scratch / "short.mp4", scratch / "preview.png",
+            archive_path=archive_path, use_clip="clip_source" in direction,
         )
+        style = topic.get("format", "quiz")
+        pause = next(gap for role, _, gap in spoken_plan(topic, beats) if role == "answer")
+        metadata = youtube_metadata(topic, trends, archive_used=archive_path is not None)
+        if "clip_source" in direction:
+            body, separator, tags = metadata["description"].rpartition("\n\n")
+            clip = CLIPS[topic["id"]]
+            metadata["description"] = f'{body}\n\n{clip["credit"]} {clip["source"]}{separator}{tags}'
         save_json(scratch / "metadata.json", {
             "topic_id": topic["id"], "selection": provenance, "duration_seconds": seconds,
-            **youtube_metadata(topic, trends, archive_used=archive_path is not None),
+            **metadata,
             "narration": [line for _, line, _ in spoken_plan(topic, beats)],
             "format": style, "source": topic["source"],
             "production": direction,
             "archive": topic.get("archive") if archive_path is not None else None,
-            "answer_pause_seconds": pause, "needs_review": beats != topic["beats"],
+            "answer_pause_seconds": pause, "needs_review": bool(episode_plan) or beats != topic["beats"],
             "made_for_kids": False, "synthetic_media": False,
         })
         (scratch / "flow-prompt.txt").write_text(
-            f'Create a vertical 9:16 {seconds}-second illustrated {style} Short.\n'
-            f'Subject: {topic["title"]}.\n'
-            f'Open immediately with this spoken line: {beats[0]}\n'
-            f'{transition}'
-            'Keep the opening visuals on the subject and save the explanation for the reveal.\n'
-            f'Then answer it in voice-over: {beats[1]}\n'
-            f'Illustrate the answer: {topic["labels"][0].lower()}, then {topic["labels"][1].lower()}.\n'
-            f'Use a {direction["delivery"]} delivery and a {direction["soundtrack"]} soundtrack. '
-            f'Use a consistent narrator and build a distinct {direction["theme"]} visual treatment. '
-            'Keep music below the voice.\n'
-            'Use illustrated motion graphics, clear visual transitions, and no logos or onscreen text.\n',
+            brief,
+            encoding="utf-8",
+        )
+        (scratch / "research-prompt.txt").write_text(
+            f'Research this short for a general audience: {topic["title"]}\n'
+            f'Start with this source: {topic["source"]}\n'
+            'Check the narration against primary sources such as mission archives, original papers, '
+            'or museum collections. Give two concrete details that explain how we know, with direct links. '
+            'Flag uncertain claims and suggest one relevant archival shot with its credit and usage terms. '
+            'Draft a short natural opening, a question-led alternative, and a concise explanation. '
+            'Keep the final two seconds clear for the follow and subscribe overlay.\n'
+            f'Current narration: {" ".join(beats)}\n',
             encoding="utf-8",
         )
         scratch.rename(job)
@@ -249,6 +389,8 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
     if current.get("video_id"):
         print(f"Already uploaded: https://youtu.be/{current['video_id']}")
         return
+    if meta.get("language") == "hi" and meta.get("production", {}).get("voice") != "Recorded Hindi narration":
+        raise ValueError("Re-record and render this Hindi draft before publishing it.")
     if meta["needs_review"] and not allow_reviewed:
         raise ValueError("Review the Gemini draft, then use upload --reviewed to confirm it.")
     if not TOKEN.exists():
@@ -285,15 +427,19 @@ def cli():
     sub.add_parser("setup-voice", help="Download the free Piper voice set")
     assets = sub.add_parser("setup-assets", help="Download the verified history images")
     assets.add_argument("--topic", action="append", help="Only fetch the selected archival topic")
+    clip_setup = sub.add_parser("setup-footage", help="Download reviewed NASA footage")
+    clip_setup.add_argument("--topic", choices=CLIPS)
     connect = sub.add_parser("connect-youtube", help="Authenticate the intended YouTube channel")
     connect.add_argument("--client", type=Path, default=CLIENT,
                          help="Path to the downloaded Google OAuth Desktop client JSON")
     for command in ("generate", "daily"):
         cmd = sub.add_parser(command, help="Render a local draft" if command == "generate" else "Run one or two daily slots")
-        cmd.add_argument("--seconds", type=int, choices=(12, 15, 20), default=12)
+        cmd.add_argument("--seconds", type=int, choices=DURATIONS, help="Override the episode length")
         cmd.add_argument("--region", default="IN", help="Google Trends region code")
         cmd.add_argument("--offline", action="store_true", help="Use the topic library without fetching trends")
     generate = sub.choices["generate"]
+    generate.add_argument("--shot-planner", choices=("ollama", "gemini"),
+                          help="Use Gemini for one complete episode plan or Ollama for shot direction")
     generate.add_argument("--topic", help="Select an ID from topics.json")
     generate.add_argument("--gemini", action="store_true", help="Use an explicit free-tier key for a reviewed draft")
     daily = sub.choices["daily"]
@@ -313,6 +459,10 @@ def cli():
 def run(args):
     if args.command == "setup-voice":
         setup_voice()
+        return
+    if args.command == "setup-footage":
+        for topic_id in ([args.topic] if args.topic else CLIPS):
+            print(footage.setup(topic_id))
         return
     if args.command == "setup-assets":
         available = {topic["id"]: topic for topic in read_json(ROOT / "topics.json") if "archive" in topic}
@@ -354,7 +504,7 @@ def run(args):
         publish(job, args.visibility, today(args.timezone), args.daily_limit, args.reviewed)
         return
 
-    topics = read_json(ROOT / "topics.json")
+    topics = [topic for topic in read_json(ROOT / "topics.json") if topic.get("language") not in PAUSED_LANGUAGES]
     if not re.fullmatch(r"[A-Z]{2}", args.region):
         raise ValueError("Use a two-letter region code, such as IN or US.")
     used = {read_json(path / "metadata.json")["topic_id"] for path in completed_jobs()}
@@ -379,7 +529,7 @@ def run(args):
             print(reason)
             return
         job = OUTPUT / f'{topic["id"]}-{uuid.uuid4().hex[:8]}'
-        render_job(topic, reason, args.seconds, job, args.gemini, trends=current_trends())
+        render_job(topic, reason, args.seconds, job, args.gemini, trends=current_trends(), planner=args.shot_planner)
         return
 
     if args.upload and (not TOKEN.exists() or not args.channel_id or

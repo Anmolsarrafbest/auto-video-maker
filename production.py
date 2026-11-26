@@ -5,7 +5,7 @@ VOICE_SNAPSHOT = "5ec43b186ef915a195d3ddbcfd9916e76c503c3f"
 ALBA = "en_GB-alba-medium"
 JOE = "en_US-joe-medium"
 INDIAN_ENGLISH = "Microsoft Heera"
-HINDI = "eSpeak NG Hindi"
+HINDI = "Recorded Hindi narration"
 ATTRIBUTION = (
     "Narration synthesized with Piper en_US-hifi_tts_92-medium, trained on the voice of "
     "Cori Samuel (Hi-Fi TTS reader 92), CC BY 4.0. The audio is synthesized. "
@@ -32,7 +32,10 @@ TREATMENTS = {
     "lab": (JOE, "precise", "syncopated marimba"),
     "observatory": (VOICE, "curious", "ambient synth"),
     "ocean": (ALBA, "gentle", "slow instrumental swell"),
+    "copper": (VOICE, "precise", "orbital groove"),
+    "paper": (ALBA, "documentary", "felt piano"),
 }
+TOPIC_THEMES = {"jupiter-spin": "copper", "katherine-johnson": "paper"}
 TOPIC_VOICES = {
     "wright-first-flight": JOE,
     "leavitt-stars": VOICE,
@@ -50,6 +53,7 @@ def treatment(topic):
     }.get(topic.get("category"), "observatory")
     if topic.get("format") == "demo":
         theme = "lab"
+    theme = TOPIC_THEMES.get(topic.get("id"), theme)
     voice, delivery, soundtrack = TREATMENTS[theme]
     voice = TOPIC_VOICES.get(topic.get("id"), voice)
     language = topic.get("language", "en")
@@ -71,6 +75,6 @@ def treatment(topic):
 def voice_credit(voice):
     extra = {
         INDIAN_ENGLISH: "Narration synthesized locally with Microsoft Heera, Windows English (India).",
-        HINDI: "हिंदी वाचन eSpeak NG से बनाया गया। https://github.com/espeak-ng/espeak-ng",
+        HINDI: "हिंदी वाचन इस वीडियो के लिए रिकॉर्ड किया गया है।",
     }
     return extra[voice] if voice in extra else VOICE_CREDITS[voice]

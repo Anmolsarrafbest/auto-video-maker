@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import shorts
+from storyboard import DURATIONS
 
 PROGRESS = shorts.ROOT / "pilot-progress.json"
 PREFIX = "queue-"
@@ -30,11 +31,18 @@ def review_signature(job):
 
 def approval_matches(job):
     review = job / "review.json"
-    return (review.is_file() and shorts.read_json(job / "metadata.json").get("production")
-            and shorts.read_json(review) == review_signature(job))
+    if not review.is_file():
+        return False
+    meta = shorts.read_json(job / "metadata.json")
+    production = meta.get("production", {})
+    if meta.get("language") == "hi" and production.get("voice") != "Recorded Hindi narration":
+        return False
+    return production.get("production_revision") == 2 and shorts.read_json(review) == review_signature(job)
 
 
 def prepare(args, topics):
+    if args.language in shorts.PAUSED_LANGUAGES:
+        raise ValueError("Hindi production is paused. Choose an English topic for now.")
     if PROGRESS.is_file():
         remote_topics = set(shorts.read_json(PROGRESS))
     else:
@@ -44,6 +52,7 @@ def prepare(args, topics):
         if job.name.startswith(PREFIX) or (job / "upload.json").is_file()
     }
     available = [topic for topic in topics if topic["id"] not in used
+                 and topic.get("language") not in shorts.PAUSED_LANGUAGES
                  and (args.language is None or topic.get("language", "en") == args.language)]
     if args.topic:
         selected = [topic for topic_id in dict.fromkeys(args.topic)
@@ -75,7 +84,8 @@ def refresh(args, topics):
             continue
         meta = shorts.read_json(job / "metadata.json")
         topic = catalogue.get(meta["topic_id"])
-        if topic and meta.get("production") != shorts.render_treatment(topic):
+        if (topic and topic.get("language") not in shorts.PAUSED_LANGUAGES
+                and meta.get("production") != shorts.render_treatment(topic)):
             pending.append((job, meta, topic))
     if not pending:
         print("No drafts need the new production treatments.")
@@ -89,7 +99,7 @@ def refresh(args, topics):
             backup = archive / f"{job.name}-{uuid4().hex[:8]}"
         with TemporaryDirectory(dir=shorts.STATE, prefix="refresh-") as directory:
             staged = Path(directory) / job.name
-            shorts.render_job(topic, "Refreshed review draft", meta["duration_seconds"], staged, trends=trends)
+            shorts.render_job(topic, "Refreshed review draft", None, staged, trends=trends)
             job.rename(backup)
             try:
                 staged.rename(job)
@@ -103,8 +113,10 @@ def approve(job, topics):
     if (job / "upload.json").is_file():
         raise ValueError("This video already has an upload record.")
     meta = shorts.read_json(job / "metadata.json")
-    if not meta.get("production"):
+    if meta.get("production", {}).get("production_revision") != 2:
         raise ValueError("Run python queue_publish.py refresh before approving this older draft.")
+    if meta.get("language") == "hi" and meta["production"]["voice"] != "Recorded Hindi narration":
+        raise ValueError("Re-record and render this Hindi draft before approving it.")
     topic = next((item for item in topics if item["id"] == meta["topic_id"]), None)
     if topic is None or topic["source"] not in meta["description"]:
         raise ValueError("The draft description must include its original fact source.")
@@ -113,6 +125,9 @@ def approve(job, topics):
         if (archive is None or archive != meta.get("archive") or
                 archive["credit"] not in meta["description"] or archive["source"] not in meta["description"]):
             raise ValueError("Restore the archival photograph credit and source before approving the Short.")
+    clip_source = meta["production"].get("clip_source")
+    if clip_source and clip_source not in meta["description"]:
+        raise ValueError("Restore the clip source in the description before approving the Short.")
     default = shorts.youtube_metadata(topic)
     allowed = {word.lower() for word in default["description"].splitlines()[-1].split()}
     allowed.update("#" + shorts.cleaned(alias).replace(" ", "") for alias in topic["aliases"])
@@ -185,7 +200,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     draft = sub.add_parser("prepare")
     draft.add_argument("--count", type=int, choices=range(1, 21), default=4)
-    draft.add_argument("--seconds", type=int, choices=(12, 15, 20), default=15)
+    draft.add_argument("--seconds", type=int, choices=DURATIONS, help="Override the episode length")
     draft.add_argument("--topic", action="append")
     draft.add_argument("--language", choices=("en", "en-IN", "hi"))
     draft.add_argument("--offline", action="store_true")

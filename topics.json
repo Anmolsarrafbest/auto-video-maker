@@ -3,7 +3,7 @@
     "id": "katherine-johnson", "category": "History", "format": "story", "scene": "trajectory", "color": "#F2C18C",
     "title": "Katherine Johnson double-checked a spaceflight", "labels": ["FRIENDSHIP 7", "ORBIT CALCULATIONS CHECKED BY HAND"],
     "aliases": ["katherine johnson", "friendship 7"],
-    "beats": ["Before his orbital flight, John Glenn asked for one more check.", "Katherine Johnson redid the computer's calculations by hand. Her work helped give Glenn confidence to fly."],
+    "beats": ["Before his orbital flight, John Glenn asked for one more check.", "NASA had used electronic computers to calculate the course for Friendship Seven. Glenn asked mathematician Katherine Johnson to check those results. She ran the equations by hand and found that the computer's numbers were right."],
     "source": "https://www.nasa.gov/people-of-nasa/katherine-g-johnson/",
     "archive": {
       "image": "https://images-assets.nasa.gov/image/LRC-1971-B701_P-03033/LRC-1971-B701_P-03033~large.jpg",
@@ -113,7 +113,7 @@
     "id": "moon-distance", "category": "Space", "scene": "distance", "color": "#C8C4F8",
     "title": "The Moon is slowly drifting away", "labels": ["EARTH AND MOON", "THE DISTANCE IS GROWING"],
     "aliases": ["moon distance", "moon moving away", "lunar distance"],
-    "beats": ["Is the Moon moving away from Earth?", "Yes. The Moon moves about one and a half inches farther away every year."],
+    "beats": ["Is the Moon moving away from Earth?", "Yes. The Moon moves about one and a half inches farther away every year. You would never notice that over one night. The diagram exaggerates the change so you can see what moving away means."],
     "source": "https://science.nasa.gov/moon/eclipses/"
   },
   {
@@ -134,7 +134,7 @@
     "id": "jupiter-spin", "category": "Space", "scene": "tilt", "color": "#E3AD8C",
     "title": "Jupiter has the shortest day", "labels": ["THE LARGEST PLANET", "A SPIN TAKES ABOUT TEN HOURS"],
     "aliases": ["jupiter rotation", "jupiter day", "jupiter planet"],
-    "beats": ["Which planet has the shortest day?", "Jupiter. Despite its enormous size, it spins all the way around in just under ten hours."],
+    "beats": ["Which planet has the shortest day?", "Jupiter spins once in about ten hours. In Cassini’s time-lapse, you can see neighboring cloud bands move at different speeds."],
     "source": "https://science.nasa.gov/jupiter/jupiter-facts/"
   },
   {
