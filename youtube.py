@@ -1,5 +1,6 @@
 """Authenticate a single YouTube channel and resume uploads by job."""
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -54,7 +55,7 @@ def require(response, allowed, action):
         raise ValueError(f"YouTube could not {action} (HTTP {response.status_code}). {reason}".strip())
 
 
-def upload(job, token_path, visibility, execution_date):
+def upload(job, token_path, visibility, execution_date, *, publish_at=None):
     path = job / "upload.json"
     record = read_json(path) if path.exists() else {}
     if record.get("video_id"):
@@ -70,6 +71,12 @@ def upload(job, token_path, visibility, execution_date):
         "status": {"privacyStatus": visibility, "selfDeclaredMadeForKids": meta["made_for_kids"],
                    "containsSyntheticMedia": meta["synthetic_media"]},
     }
+    if publish_at is not None:
+        if visibility != "private" or publish_at.utcoffset() is None:
+            raise ValueError("Scheduled uploads require private visibility and a time zone.")
+        if not record and publish_at <= datetime.now(timezone.utc):
+            raise ValueError("Choose a future public release time.")
+        content["status"]["publishAt"] = publish_at.isoformat()
     if meta.get("tags"):
         content["snippet"]["tags"] = meta["tags"]
     if meta.get("language"):

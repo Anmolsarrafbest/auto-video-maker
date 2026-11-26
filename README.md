@@ -126,3 +126,16 @@ For strict zero GitHub runner spend, keep the cloud workflow disabled. If you la
 The private GitHub repository's **Five-Short cloud pilot** workflow tests the uploader on a hosted Linux runner. It is specific to the Skill_issue channel and uses the repository Actions secret `YOUTUBE_TOKEN_JSON`. The Git history contains only pilot topic IDs, dates, and public video IDs. Keep the secret out of source control.
 
 When enabled, the pilot can run on demand or around 6:37 p.m. India time, uploads at most two public Shorts per India calendar day, and disables itself after five. See `pilot-progress.json` for completed uploads. A reservation with no video ID stops further uploads until the channel owner checks YouTube Studio and reconciles the record. This protects against a second upload after a runner interruption. Finish the outstanding topics through either the local queue or the hosted pilot, since they use separate upload records.
+
+## Prepare Instagram Reels
+
+The local publisher uses **Instagram API with Facebook Login** so it can send local MP4 files directly. Create an Instagram profile, switch it to a **professional Creator** account, and link it to a free Facebook Page you manage. Create a Meta developer app with the Instagram API with Facebook Login publishing use case. Use a Page access token for the linked Page and the numeric Instagram professional account ID returned by `instagram_business_account`. Follow Meta’s current steps and permission requirements for the app mode you use. [Meta setup](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/get-started) · [Meta Reels publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing)
+
+```powershell
+python instagram_publish.py preview queue-katherine-johnson
+python instagram_publish.py connect --account-id YOUR_NUMERIC_ID --username YOUR_PROFILE_NAME
+python instagram_publish.py approve queue-katherine-johnson
+python instagram_publish.py publish-next
+```
+
+Enter the Page token at the hidden prompt. The token stays in the ignored `secrets/instagram.json` file. Review the video in the local queue first, then approve it explicitly for Instagram. `publish-next` can publish one approved Reel per India calendar day. It publishes immediately when Meta finishes processing. Start with one manual test, then use Windows Task Scheduler to run `python.exe` with the absolute path to `instagram_publish.py` and argument `publish-next`. Use the project folder for **Start in**. The PC must be on and signed in. If an earlier publish has an uncertain outcome, reconcile it on the Instagram profile before changing the local receipt.
