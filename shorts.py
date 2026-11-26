@@ -319,23 +319,38 @@ def discover_topic(seconds, trends, previous_titles):
         "and three distinct shot descriptions with concrete composition and motion. "
         "Use a direct public source that supports the exact claim, such as an archive, museum, university, "
         "or research paper appropriate to this particular subject. "
+        "The source must be a plain HTTPS URL to a specific article or record with a non-empty path. "
+        "Do not use Markdown links, homepages, citation labels, or placeholder URLs. "
+        "If you cannot provide a specific source, choose another idea. "
         "Give up to four space-separated Instagram hashtags that directly describe the subject. "
         "Do not claim a hashtag is trending. Do not invent footage or a source. "
         "Return only the requested fields.\n" + json.dumps(context)
     )
-    response = requests.post(GEMINI_ENDPOINT, headers={"x-goog-api-key": key}, timeout=40,
-        json={"contents": [{"parts": [{"text": instruction}]}],
-              "generationConfig": {"responseMimeType": "application/json", "responseSchema": {
-                  "type": "OBJECT", "properties": {name: {"type": "STRING"} for name in fields},
-                  "required": list(fields)}}})
-    if not response.ok:
-        raise ValueError(f"Gemini discovery failed (HTTP {response.status_code}).")
-    try:
-        parts = response.json()["candidates"][0]["content"]["parts"]
-        result = json.loads("".join(part["text"] for part in parts if not part.get("thought")))
-        result = {name: result[name].strip() for name in fields}
-    except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
-        raise ValueError("Gemini returned an incomplete discovery plan.") from error
+    correction = ""
+    for attempt in range(2):
+        response = requests.post(GEMINI_ENDPOINT, headers={"x-goog-api-key": key}, timeout=40,
+            json={"contents": [{"parts": [{"text": instruction + correction}]}],
+                  "generationConfig": {"responseMimeType": "application/json", "responseSchema": {
+                      "type": "OBJECT", "properties": {name: {"type": "STRING"} for name in fields},
+                      "required": list(fields)}}})
+        if not response.ok:
+            raise ValueError(f"Gemini discovery failed (HTTP {response.status_code}).")
+        try:
+            parts = response.json()["candidates"][0]["content"]["parts"]
+            result = json.loads("".join(part["text"] for part in parts if not part.get("thought")))
+            result = {name: result[name].strip() for name in fields}
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
+            raise ValueError("Gemini returned an incomplete discovery plan.") from error
+        try:
+            visuals.validate_reference(result["source"])
+        except ValueError as error:
+            if attempt:
+                raise ValueError("Gemini twice returned an invalid citation. Try discovery again.") from error
+            print("Gemini returned an invalid citation. Requesting one correction.", file=sys.stderr)
+            correction = ("\nThe previous idea had an invalid citation. Return a complete new response with "
+                          "a plain HTTPS link to an exact supporting article or record. Choose another idea if needed.")
+        else:
+            break
     if any(not result[name] or len(result[name]) > 450 for name in fields if name not in {"trend", "instagram_tags"}):
         raise ValueError("Gemini returned an empty or oversized discovery field.")
     if not re.fullmatch(r"[A-Za-z][A-Za-z &'-]{0,31}", result["category"]) or len(result["title"]) > 95:
@@ -349,7 +364,6 @@ def discover_topic(seconds, trends, previous_titles):
     slug = re.sub(r"[^a-z0-9]+", "-", result["title"].lower()).strip("-")
     if not slug or cleaned(result["title"]) in {cleaned(title) for title in previous_titles}:
         raise ValueError("Gemini returned a previously used title.")
-    visuals.validate_reference(result["source"])
     matched_trend = result["trend"] if any(result["trend"] in titles for titles in trends.values()) else ""
     return {"id": f"discovered-{slug[:64]}", "title": result["title"], "category": result["category"],
             "format": "story", "opening": "statement", "scene": "discovery", "color": "#91DFDA",
