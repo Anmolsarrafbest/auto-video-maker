@@ -18,13 +18,27 @@ UPLOAD = "https://rupload.facebook.com/ig-api-upload/v27.0"
 def request(session, method, url, **kwargs):
     response = session.request(method, url, timeout=45, allow_redirects=False, **kwargs)
     if not 200 <= response.status_code < 300:
+        code = None
+        subcode = None
+        detail = ""
         try:
-            code = response.json().get("error", {}).get("code")
+            payload = response.json()
         except ValueError:
-            code = None
+            payload = {}
+        if isinstance(payload, dict):
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            debug = payload.get("debug_info") if isinstance(payload.get("debug_info"), dict) else {}
+            code = error.get("code")
+            subcode = error.get("error_subcode")
+            raw_detail = error.get("error_user_msg") or error.get("message") or debug.get("message") or payload.get("message") or ""
+            detail = " ".join(str(raw_detail).split())[:240]
         if code == 190:
             raise ValueError("Instagram Page token expired or is invalid (Meta code 190). Run instagram_publish.py connect again.")
-        raise ValueError(f"Meta request failed (HTTP {response.status_code}, API code {code}).")
+        parts = [f"HTTP {response.status_code}", f"API code {code}"]
+        if subcode is not None:
+            parts.append(f"subcode {subcode}")
+        suffix = f": {detail}" if detail else ""
+        raise ValueError(f"Meta request failed ({', '.join(parts)}{suffix}).")
     return response.json()
 
 
@@ -72,11 +86,21 @@ def publish(session, config, job, record, day):
     container = record["container"]
     if not record.get("media_sent"):
         video = job / "short.mp4"
-        with video.open("rb") as handle:
-            result = request(session, "POST", f"{UPLOAD}/{container}", data=handle, headers={
-                "Authorization": f"OAuth {config['token']}", "offset": "0",
-                "file_size": str(video.stat().st_size), "Content-Type": "application/octet-stream",
-            })
+        file_size = str(video.stat().st_size)
+        last_error = None
+        for attempt in range(3):
+            try:
+                with video.open("rb") as handle:
+                    result = request(session, "POST", f"{UPLOAD}/{container}", data=handle, headers={
+                        "Authorization": f"OAuth {config['token']}", "offset": "0",
+                        "file_size": file_size, "Content-Type": "application/octet-stream",
+                    })
+                break
+            except (ValueError, shorts.requests.RequestException) as error:
+                last_error = error
+                if attempt == 2:
+                    raise
+                time.sleep(2 * (attempt + 1))
         if result.get("success") is not True:
             raise ValueError("Meta did not confirm the media transfer.")
         record["media_sent"] = True
@@ -157,7 +181,8 @@ def publish_reels(jobs, day):
     with shorts.requests.Session() as session:
         session.headers["Authorization"] = f"Bearer {token}"
         config = resolve_config(session, token)
-        for job in jobs:
+        failures = []
+        for index, job in enumerate(jobs):
             print(f"Publishing {job.name} on Instagram.", flush=True)
             path = job / "instagram.json"
             record = shorts.read_json(path) if path.is_file() else {
@@ -166,12 +191,21 @@ def publish_reels(jobs, day):
             if record.get("media_id"):
                 print(f"Instagram already published. Media ID {record['media_id']}.")
                 continue
-            for _ in range(3):
-                publish(session, config, job, record, day)
-                if record.get("media_id"):
-                    break
-            else:
-                print(f"Instagram is still processing {job.name}. Resume using publish-both.")
+            try:
+                for _ in range(3):
+                    publish(session, config, job, record, day)
+                    if record.get("media_id"):
+                        break
+                else:
+                    print(f"Instagram is still processing {job.name}. Resume using publish-both.")
+            except (ValueError, shorts.requests.RequestException) as error:
+                detail = str(error) if isinstance(error, ValueError) else type(error).__name__
+                print(f"Instagram failed for {job.name}: {detail}", file=sys.stderr)
+                failures.append(f"{job.name}: {detail}")
+            if index + 1 < len(jobs):
+                time.sleep(4)
+        if failures:
+            raise ValueError("; ".join(failures))
 
 
 def main():
