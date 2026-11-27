@@ -94,6 +94,38 @@ class TimedBeatsTests(unittest.TestCase):
         self.assertEqual(topic["discovery"]["beats"], body["beats"])
         self.assertNotIn("private-test-key", json.dumps(requests))
 
+    def test_discovery_normalizes_beat_queries_callouts_and_stray_diagrams(self):
+        body = {
+            "title": "Why blue light scatters", "category": "Physics",
+            "hook": "Look at blue light.", "explanation": "Blue light scatters in air molecules.",
+            "opening_label": "Blue light", "payoff_label": "Scattering",
+            "source": "https://example.org/science/scattering", "trend": "", "instagram_tags": "",
+            "beats": [
+                {
+                    "beat_id": 0, "anchor_text": "Look at", "visual_type": "stock_video",
+                    "search_query": "sunlight",
+                    "callout_stat": "Shortest visible wavelengths scatter much more strongly",
+                    "diagram": {"template": "process", "title": "Stray", "items": [{"label": "A"}, {"label": "B"}]},
+                },
+                {
+                    "beat_id": 1, "anchor_text": "light scatters", "visual_type": "callout_card",
+                    "search_query": "clear blue daytime sky, Rayleigh scattering molecules",
+                },
+            ],
+            "icon_query": "light", "real_event": False, "event_media_url": "", "event_year": "",
+        }
+        response = Mock(ok=True)
+        response.json.return_value = {"candidates": [{"content": {"parts": [{"text": json.dumps(body)}]}}]}
+        with patch.object(shorts, "secret", return_value="private-test-key"), \
+                patch.object(shorts.requests, "post", return_value=response) as post:
+            topic = shorts.discover_topic(18, {}, [])
+        post.assert_called_once()
+        beats = topic["discovery"]["beats"]
+        self.assertEqual(beats[0]["search_query"], "sunlight blue")
+        self.assertLessEqual(len(beats[0]["callout_stat"]), 38)
+        self.assertNotIn("diagram", beats[0])
+        self.assertEqual(beats[1]["search_query"], "clear blue daytime sky")
+
     def test_cache_separates_beat_assets_and_skips_callout_search(self):
         specs = [visual_beat(1, "Blue light", "blue light"), visual_beat(2, "light scatters", kind="callout_card")]
         topic = {"id": "fixture", "title": "Blue light", "category": "Science",

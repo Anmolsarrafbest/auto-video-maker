@@ -30,7 +30,7 @@ from production import (ATTRIBUTION, DISCOVERY_TREATMENTS, VOICE_CREDITS, VOICE_
                         discovery_treatment, treatment, voice_credit)
 from render import OUTRO_SECONDS, encode, narration, spoken_plan
 from storyboard import (CLIPS, DIAGRAM_TEMPLATES, DISCOVERY_DURATIONS, DURATIONS, VISUAL_TYPES, episode, flow_prompt,
-                        validate_visual_beats, visual_beat_text)
+                        validate_diagram, validate_visual_beats, visual_beat_text)
 from local_secrets import secret
 from youtube import has_token, read_json, read_token, save_json, sign_in, upload
 
@@ -341,6 +341,85 @@ def gemini_episode(topic, seconds, assets, *, hq_script=False, loop=False):
     return plan
 
 
+def _fit_line(text, limit):
+    cleaned_text = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
+    if len(cleaned_text) <= limit:
+        return cleaned_text
+    trimmed = cleaned_text[:limit].rsplit(" ", 1)[0].strip()
+    return trimmed or cleaned_text[:limit].strip()
+
+
+def _normalize_search_query(raw_query, *fallback_texts):
+    tokens = [tok for tok in re.findall(r"[\w'-]+", str(raw_query or "")) if re.search(r"\w", tok)]
+    seen = {tok.casefold() for tok in tokens}
+    if len(tokens) < 2:
+        for text in fallback_texts:
+            for tok in re.findall(r"[\w'-]+", str(text or "")):
+                if re.search(r"\w", tok) and tok.casefold() not in seen:
+                    tokens.append(tok)
+                    seen.add(tok.casefold())
+                    if len(tokens) == 2:
+                        break
+            if len(tokens) == 2:
+                break
+        for pad in ("science", "detail"):
+            if len(tokens) >= 2:
+                break
+            if pad not in seen:
+                tokens.append(pad)
+                seen.add(pad)
+    tokens = tokens[:4]
+    while len(" ".join(tokens)) > 70 and len(tokens) > 2:
+        tokens.pop()
+    if len(" ".join(tokens)) > 70:
+        tokens = [tok[:32] for tok in tokens[:2]]
+    return " ".join(tokens)
+
+
+def normalize_discovery_beats(beats, title, category):
+    """Sanitize minor Gemini beat formatting drift before strict storyboard validation."""
+    if not isinstance(beats, list):
+        return beats
+    fallback_keywords = " ".join(visuals.keywords(title) or [title])
+    category_keywords = " ".join(visuals.keywords(category) or [category])
+    normalized = []
+    for beat in beats:
+        if not isinstance(beat, dict):
+            normalized.append(beat)
+            continue
+        item = dict(beat)
+        anchor = str(item.get("anchor_text") or "")
+        item["search_query"] = _normalize_search_query(
+            item.get("search_query"),
+            fallback_keywords,
+            " ".join(visuals.keywords(anchor) or [anchor]),
+            category_keywords,
+        )
+        if "callout_stat" in item:
+            item["callout_stat"] = _fit_line(item.get("callout_stat"), 38)
+        if "diagram" in item:
+            if item.get("visual_type") != "diagram" or not isinstance(item.get("diagram"), dict):
+                item.pop("diagram", None)
+            else:
+                diag = dict(item["diagram"])
+                if "title" in diag:
+                    diag["title"] = _fit_line(diag.get("title"), 40)
+                if "unit" in diag:
+                    diag["unit"] = _fit_line(diag.get("unit"), 12)
+                if isinstance(diag.get("items"), list):
+                    diag["items"] = [
+                        {**entry, "label": _fit_line(entry.get("label"), 32)}
+                        if isinstance(entry, dict) else entry
+                        for entry in diag["items"]
+                    ]
+                try:
+                    item["diagram"] = validate_diagram(diag)
+                except ValueError:
+                    item.pop("diagram", None)
+        normalized.append(item)
+    return normalized
+
+
 def discover_topic(seconds, trends, previous_titles, *, subject_area=None, requests_sent=None,
                    hq_script=False, loop=False):
     key = secret("GEMINI_FREE_API_KEY").strip()
@@ -406,7 +485,8 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
     )
     correction = ""
     active_model = GEMINI_DEFAULT_MODEL
-    for attempt in range(2):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         request_body = {"contents": [{"parts": [{"text": instruction + correction}]}],
                   "generationConfig": {"responseMimeType": "application/json", "responseSchema": {
                       "type": "OBJECT", "properties": {
@@ -444,33 +524,38 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         try:
             visuals.validate_reference(result["source"])
         except ValueError as error:
-            if attempt:
-                raise ValueError("Gemini twice returned an invalid citation. Try discovery again.") from error
+            if attempt == max_attempts - 1:
+                raise ValueError("Gemini repeatedly returned an invalid citation. Try discovery again.") from error
             print("Gemini returned an invalid citation. Requesting one correction.", file=sys.stderr)
             correction = ("\nThe previous idea had an invalid citation. Return a complete new response with "
                           "a plain HTTPS link to an exact supporting article or record. Choose another idea if needed.")
         else:
             if BANNED_OPENERS.search(result["hook"]):
-                if attempt:
-                    raise ValueError("Gemini twice used a banned generic opening.")
+                if attempt == max_attempts - 1:
+                    raise ValueError("Gemini repeatedly used a banned generic opening.")
                 correction = ("\nDo not start the hook with generic phrases like 'Did you know', "
                               "'In this video', or 'Have you ever wondered'. Open with a concrete visual hook.")
                 continue
             if sum(len(result[name].split()) for name in ("hook", "explanation")) > int(seconds * 3.1):
-                if attempt:
-                    raise ValueError("Gemini twice returned narration that was too long.")
+                if attempt == max_attempts - 1:
+                    raise ValueError("Gemini repeatedly returned narration that was too long.")
                 correction = (f"\nReturn the complete plan again with at most {int(seconds * 2.5)} spoken words. "
                               "Count only the hook and explanation.")
                 continue
+            normalized_beats = normalize_discovery_beats(
+                model_output.get("beats"), result["title"], result["category"],
+            )
             try:
-                visual_beats = validate_visual_beats(model_output.get("beats"),
+                visual_beats = validate_visual_beats(normalized_beats,
                                                      [result["hook"], result["explanation"]], seconds)
             except ValueError as error:
-                if attempt:
+                if attempt == max_attempts - 1:
                     raise
                 correction = f"\nReturn the entire plan again and correct the visual beats. {error}"
                 continue
             break
+    for label_field in ("opening_label", "payoff_label"):
+        result[label_field] = _fit_line(result[label_field], 38)
     if any(not result[name] or len(result[name]) > (1400 if name == "explanation" else 450)
            for name in fields if name not in {"trend", "instagram_tags"}):
         raise ValueError("Gemini returned an empty or oversized discovery field.")
