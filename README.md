@@ -194,6 +194,21 @@ GitHub Actions draft artifact with one-day retention. To enable publishing, set
 The cloud runner uses CPU-only Kokoro. Without cached music or a SoundFont,
 the render uses narration audio. Credentials stay in Actions secrets.
 
+### Before making the repository public
+
+- Copy `.env.example` to a local `.env` for development. Store live API keys,
+  credentials and tokens in Actions secrets for hosted runs.
+- Review Git history, Actions logs, artifacts, and release attachments before
+  switching visibility. Rotate any credential that has previously been shared.
+  [GitHub's visibility checklist](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility)
+- Public Spark runs default to draft mode even if `SPARK_PUBLISH_MODE` is set.
+  Public publishing requires `SPARK_PUBLIC_PUBLISH_ENABLED=true`.
+  Public preview artifacts require `SPARK_SAVE_PUBLIC_ARTIFACTS=true`.
+  Use Actions secrets for account identifiers if you prefer to mask them in logs.
+- The earlier scheduled YouTube pilot requires `SHORTS_PILOT_ENABLED=true`
+  and a configured `PILOT_YOUTUBE_CHANNEL_ID`. Leave the pilot disabled for
+  a public source release unless you intend to resume its fixed upload plan.
+
 ```powershell
 python spark_job.py --mode validate --input spark-example.json
 $request = @{ ref = 'main'; inputs = @{ idea_json = (Get-Content .\spark-example.json -Raw) } } |

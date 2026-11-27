@@ -8,7 +8,6 @@ import shorts
 
 PLAN = ("coral-animals", "saturn-rings", "rainbow-split", "moon-distance", "mars-sunset")
 PROGRESS = shorts.ROOT / "pilot-progress.json"
-CHANNEL_ID = "UC4NykRph22My_R4us6PIAsg"
 AUDIENCE = "public"
 
 
@@ -34,7 +33,8 @@ def run():
     if not raw_token:
         raise SystemExit("The repository needs its YOUTUBE_TOKEN_JSON Actions secret.")
     token = json.loads(raw_token)
-    if token.get("channel", {}).get("id") != CHANNEL_ID:
+    expected_channel = os.getenv("PILOT_YOUTUBE_CHANNEL_ID")
+    if not expected_channel or token.get("channel", {}).get("id") != expected_channel:
         raise SystemExit("The OAuth secret is for a different YouTube channel.")
     shorts.save_json(shorts.TOKEN, token)
     shorts.OUTPUT.mkdir(exist_ok=True)

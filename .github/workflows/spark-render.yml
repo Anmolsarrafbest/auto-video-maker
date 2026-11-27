@@ -34,18 +34,15 @@ jobs:
         with:
           python-version: '3.12'
       - name: Validate the idea
-        env:
-          SPARK_IDEA_JSON: ${{ inputs.idea_json }}
         run: python -m pip install -r requirements.txt "kokoro-onnx>=0.4.7,<1" && python spark_job.py --mode validate
       - name: Prepare local voices
         run: python shorts.py setup-kokoro
       - name: Render and optionally publish
         env:
-          SPARK_IDEA_JSON: ${{ inputs.idea_json }}
-          SPARK_MODE: ${{ vars.SPARK_PUBLISH_MODE || 'draft' }}
-          SPARK_YOUTUBE_CHANNEL_ID: ${{ vars.SPARK_YOUTUBE_CHANNEL_ID }}
-          SPARK_INSTAGRAM_ACCOUNT_ID: ${{ vars.SPARK_INSTAGRAM_ACCOUNT_ID }}
-          SPARK_INSTAGRAM_USERNAME: ${{ vars.SPARK_INSTAGRAM_USERNAME }}
+          SPARK_MODE: ${{ (github.event.repository.private || vars.SPARK_PUBLIC_PUBLISH_ENABLED == 'true') && vars.SPARK_PUBLISH_MODE || 'draft' }}
+          SPARK_YOUTUBE_CHANNEL_ID: ${{ secrets.SPARK_YOUTUBE_CHANNEL_ID || vars.SPARK_YOUTUBE_CHANNEL_ID }}
+          SPARK_INSTAGRAM_ACCOUNT_ID: ${{ secrets.SPARK_INSTAGRAM_ACCOUNT_ID || vars.SPARK_INSTAGRAM_ACCOUNT_ID }}
+          SPARK_INSTAGRAM_USERNAME: ${{ secrets.SPARK_INSTAGRAM_USERNAME || vars.SPARK_INSTAGRAM_USERNAME }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           INSTAGRAM_PAGE_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_PAGE_ACCESS_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
@@ -55,7 +52,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python spark_job.py --mode "$SPARK_MODE"
       - name: Save preview
-        if: success() || failure()
+        if: ${{ (success() || failure()) && (github.event.repository.private || vars.SPARK_SAVE_PUBLIC_ARTIFACTS == 'true') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: spark-short

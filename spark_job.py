@@ -123,6 +123,17 @@ def publish(job, topic, destinations):
             raise ValueError("Instagram is still processing. Check its saved container before trying again.")
 
 
+def read_payload(path):
+    if path:
+        return path.read_text(encoding="utf-8-sig")
+    if "SPARK_IDEA_JSON" in os.environ:
+        return os.environ["SPARK_IDEA_JSON"]
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+        return event["inputs"]["idea_json"]
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("validate", "draft", "youtube", "instagram", "both"), default="draft")
@@ -132,9 +143,8 @@ def main():
     args = parser.parse_args()
     if args.offline and args.mode not in {"validate", "draft"}:
         parser.error("--offline supports validate and draft modes.")
-    raw = args.input.read_text(encoding="utf-8-sig") if args.input else os.environ.get("SPARK_IDEA_JSON", "")
     try:
-        topic, seconds = parse_idea(raw)
+        topic, seconds = parse_idea(read_payload(args.input))
         if args.mode == "validate":
             print(f"Valid Spark job: {topic['id']} ({seconds}s)")
             return

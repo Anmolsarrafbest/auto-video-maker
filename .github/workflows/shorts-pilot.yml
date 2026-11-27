@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   pilot:
-    if: github.ref == 'refs/heads/main'
+    if: vars.SHORTS_PILOT_ENABLED == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -30,6 +30,7 @@ jobs:
       - name: Run pilot
         env:
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          PILOT_YOUTUBE_CHANNEL_ID: ${{ secrets.PILOT_YOUTUBE_CHANNEL_ID || vars.PILOT_YOUTUBE_CHANNEL_ID }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
