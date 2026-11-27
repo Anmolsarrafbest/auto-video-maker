@@ -96,21 +96,18 @@ def publish(job, topic, destinations):
     youtube_enabled = destinations in {"youtube", "both"}
     instagram_enabled = destinations in {"instagram", "both"}
     token = shorts.read_token(shorts.TOKEN) if youtube_enabled else None
-    if youtube_enabled and token["channel"]["id"] != os.environ.get("SPARK_YOUTUBE_CHANNEL_ID"):
+    expected_channel = os.environ.get("SPARK_YOUTUBE_CHANNEL_ID", "").strip()
+    if youtube_enabled and expected_channel and token["channel"]["id"] != expected_channel:
         raise ValueError("The configured YouTube channel and OAuth account must match.")
     day = shorts.today("Asia/Kolkata")
     with shorts.requests.Session() as session:
         if instagram_enabled:
-            account_id = os.environ["SPARK_INSTAGRAM_ACCOUNT_ID"]
-            if not re.fullmatch(r"\d+", account_id):
-                raise ValueError("Set a numeric Instagram professional account ID.")
             access_token = shorts.secret("INSTAGRAM_PAGE_ACCESS_TOKEN")
+            if not access_token:
+                raise ValueError("INSTAGRAM_PAGE_ACCESS_TOKEN is missing.")
             session.headers["Authorization"] = f"Bearer {access_token}"
-            profile = ig.account(session, account_id)
-            if profile["username"].casefold() != os.environ["SPARK_INSTAGRAM_USERNAME"].casefold():
-                raise ValueError("The configured Instagram profile and Page token must match.")
-            config = {"account_id": account_id, "token": access_token}
-            approval = {"account_id": account_id, "review": queue_publish.review_signature(job)}
+            config = ig.resolve_config(session, access_token)
+            approval = {"account_id": config["account_id"], "review": queue_publish.review_signature(job)}
             ig.caption(job)
         claim_publication(topic["id"])
         if youtube_enabled:

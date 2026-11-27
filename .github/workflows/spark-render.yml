@@ -23,9 +23,10 @@ jobs:
     permissions:
       contents: write
     env:
-      USE_LOCAL_GPU: 'false'
-      SHORTS_FPS: '30'
-      SHORTS_KOKORO_VOICE: auto
+      USE_LOCAL_GPU: ${{ vars.USE_LOCAL_GPU || 'false' }}
+      SHORTS_FPS: ${{ vars.SHORTS_FPS || '30' }}
+      SHORTS_KOKORO_VOICE: ${{ vars.SHORTS_KOKORO_VOICE || 'auto' }}
+      ENABLE_PEXELS: ${{ vars.ENABLE_PEXELS || 'false' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -35,8 +36,14 @@ jobs:
           python-version: '3.12'
       - name: Validate the idea
         run: python -m pip install -r requirements.txt "kokoro-onnx>=0.4.7,<1" && python spark_job.py --mode validate
-      - name: Prepare local voices
-        run: python shorts.py setup-kokoro
+      - name: Prepare local voices and captions
+        run: |
+          if [ -n "$SHORTS_KOKORO_VOICE" ]; then
+            python shorts.py setup-kokoro
+          else
+            python shorts.py setup-voice
+          fi
+          python shorts.py setup-captions
       - name: Render and optionally publish
         env:
           SPARK_MODE: ${{ (github.event.repository.private || vars.SPARK_PUBLIC_PUBLISH_ENABLED == 'true') && vars.SPARK_PUBLISH_MODE || 'draft' }}
@@ -45,6 +52,7 @@ jobs:
           SPARK_INSTAGRAM_USERNAME: ${{ secrets.SPARK_INSTAGRAM_USERNAME || vars.SPARK_INSTAGRAM_USERNAME }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           INSTAGRAM_PAGE_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_PAGE_ACCESS_TOKEN }}
+          GEMINI_FREE_API_KEY: ${{ secrets.GEMINI_FREE_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}

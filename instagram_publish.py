@@ -125,20 +125,38 @@ def publish_batch(jobs, platform="both"):
         raise ValueError("\n".join(failures))
 
 
+def resolve_config(session, token):
+    if CONFIG.is_file():
+        config = shorts.read_json(CONFIG)
+        profile = account(session, config["account_id"])
+        if profile["id"] != config["account_id"] or profile["username"].casefold() != config["username"].casefold():
+            raise ValueError("The Instagram token resolved to a different account.")
+        return {"account_id": config["account_id"], "username": config["username"], "token": token}
+    account_id = secret("SPARK_INSTAGRAM_ACCOUNT_ID").strip()
+    username = secret("SPARK_INSTAGRAM_USERNAME").strip()
+    if account_id:
+        if not re.fullmatch(r"\d+", account_id):
+            raise ValueError("Set a numeric Instagram professional account ID.")
+        profile = account(session, account_id)
+        if username and profile["username"].casefold() != username.casefold():
+            raise ValueError("The configured Instagram profile and Page token must match.")
+        return {"account_id": profile["id"], "username": profile["username"], "token": token}
+    page = request(session, "GET", f"{GRAPH}/me", params={"fields": "instagram_business_account{id,username}"})
+    linked = page.get("instagram_business_account") or {}
+    if not linked.get("id") or not linked.get("username"):
+        raise ValueError("Connect your Instagram Creator account or set SPARK_INSTAGRAM_ACCOUNT_ID.")
+    return {"account_id": str(linked["id"]), "username": linked["username"], "token": token}
+
+
 def publish_reels(jobs, day):
-    if not CONFIG.is_file():
-        raise ValueError("Connect your Instagram Creator account first.")
-    config = shorts.read_json(CONFIG)
-    config["token"] = secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or config.get("token")
-    if not config["token"]:
+    token = secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or (shorts.read_json(CONFIG).get("token") if CONFIG.is_file() else "")
+    if not token:
         raise ValueError("The Instagram Page token is missing.")
     for job in jobs:
         caption(job)
     with shorts.requests.Session() as session:
-        session.headers["Authorization"] = f"Bearer {config['token']}"
-        profile = account(session, config["account_id"])
-        if profile["id"] != config["account_id"] or profile["username"].casefold() != config["username"].casefold():
-            raise ValueError("The Instagram token resolved to a different account.")
+        session.headers["Authorization"] = f"Bearer {token}"
+        config = resolve_config(session, token)
         for job in jobs:
             print(f"Publishing {job.name} on Instagram.", flush=True)
             path = job / "instagram.json"
