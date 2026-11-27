@@ -77,15 +77,20 @@ python visuals.py venus-spin "Venus atmosphere" --provider nasa --use REVIEWED_I
 python visuals.py venus-spin "Venus atmosphere" --auto
 ```
 
-NASA and Wikimedia Commons require no key. `--provider pexels` and `--provider pixabay` use free API
-keys named `PEXELS_API_KEY` and `PIXABAY_API_KEY` in `.env`. The selected
-asset is cached with its credit and source for offline rendering.
-With `--auto`, the tool searches NASA, Commons, and any stock providers with keys
-configured. It filters for relevance, then prefers suitable 9:16 footage and
-other portrait HD clips. Other clips and photos remain available. Pass `--provider` to
-restrict the search. Review automatically selected visuals before posting.
+NASA, Wikimedia Commons, and Internet Archive require no key. Pixabay uses
+`PIXABAY_API_KEY`. To opt into Pexels, set `ENABLE_PEXELS=true` and supply
+`PEXELS_API_KEY`. Coverr is optional with `COVERR_API_KEY` and a local
+50-request-per-hour limit. Confirm Coverr's applicable attribution and use
+terms before publishing its footage.
+Search responses are cached on the runner or local machine for 24 hours.
+Selected assets are cached with their credits for offline rendering.
+With `--auto`, the tool filters for relevance, prioritizes video, and prefers
+9:16 footage among suitable clips. Pass `--provider` to restrict the search.
 
-Gemini discovery and Spark can select media for each timed visual beat. They put the results and credits in
+Gemini discovery and Spark can select media for each timed visual beat. A
+beat's optional `fallback_video_query` gives a broader video search. The
+renderer can use another window from a relevant cached clip before it falls
+back to a still or card. They put the results and credits in
 `assets-cache/visuals/<topic_id>.json`. A matching Iconify SVG can appear on
 fallback cards. Pass `--no-auto-visuals` to use cached assets only. Standard
 topic generation stays offline with `--offline`. To render an existing Spark
@@ -93,9 +98,10 @@ idea offline, use `python spark_job.py --mode draft --offline --input spark-exam
 An explicit `shorts.py generate --discover --offline` still calls Gemini for
 the script and skips trends and visual searches.
 
-Video durations are targets. The renderer adjusts speech tempo within a limited
-range and reserves the last two seconds for the follow card. When narration
-still finishes early, it shortens the export. The target, actual duration, and
+Video durations are targets. Synthesized narration defaults to natural speed.
+Set `NARRATION_SPEED` in `.env` or as a GitHub Actions variable to tune it.
+The measured narration determines the export length, with two seconds reserved
+for the follow card in regular mode. The target, actual duration, and
 narration end time are recorded in `metadata.json`. Successful Gemini discovery drafts
 also include `gemini-discovery.json` with the accepted request body and model
 response for inspection. The file contains no API key.

@@ -43,12 +43,21 @@ def is_portrait(ffmpeg, path):
     return bool(size and int(size[1]) < int(size[2]))
 
 
-def decode_frames(ffmpeg, path, fps, *, portrait=False, offset=0):
+def video_duration(ffmpeg, path):
+    info = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
+    match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", info.stderr)
+    if not match:
+        return 0
+    hours, minutes, seconds = map(float, match.groups())
+    return 3600 * hours + 60 * minutes + seconds
+
+
+def decode_frames(ffmpeg, path, fps, *, portrait=False, offset=0, duration=4):
     width, height = (720, 1280) if portrait else (1080, 608)
     stride = width * height * 3
     frames = []
     with subprocess.Popen(
-        [ffmpeg, "-v", "error", "-ss", str(offset), "-i", str(path), "-t", "4",
+        [ffmpeg, "-v", "error", "-ss", str(offset), "-i", str(path), "-t", str(duration),
          "-vf", f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
          "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],

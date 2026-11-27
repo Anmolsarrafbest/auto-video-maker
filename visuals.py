@@ -27,6 +27,9 @@ PIXABAY_CACHE = Path(__file__).resolve().parent / "assets-cache" / "pixabay_sear
 LIMIT = 40 * 1024 * 1024
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 COMMONS_HEADERS = {"User-Agent": "AutoVideoMaker/1.1 (https://github.com/Anmolsarrafbest/auto-video-maker)"}
+PEXELS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; AutoVideoMaker/1.1; +https://github.com/Anmolsarrafbest/auto-video-maker)",
+}
 COMMONS_INFO = {"action": "query", "prop": "imageinfo", "format": "json", "formatversion": 2,
                 "iiprop": "url|mime|size|extmetadata",
                 "iiextmetadatafilter": "Artist|LicenseShortName|LicenseUrl|Restrictions|ImageDescription|DateTimeOriginal"}
@@ -56,7 +59,8 @@ def cache_commons(topic_id, source, *, event_year=""):
     title = unquote(url.path.removeprefix("/wiki/"))
     if url.hostname != "commons.wikimedia.org" or not title.startswith("File:"):
         raise ValueError("For automatic media import, use a Wikimedia Commons File: page.")
-    response = get(COMMONS_API, headers=COMMONS_HEADERS, params={**COMMONS_INFO, "titles": title})
+    response = stock_get(COMMONS_API, {**COMMONS_INFO, "titles": title},
+                         headers=COMMONS_HEADERS, provider="wikimedia")
     try:
         page = response["query"]["pages"][0]
     except (KeyError, IndexError, TypeError) as error:
@@ -140,31 +144,102 @@ def pixabay_get(endpoint, params, media_type):
     return value
 
 
-def stock_get(url, params, headers=None):
+def stock_get(url, params, headers=None, *, provider=None):
     public_params = {name: value for name, value in params.items() if name != "key"}
     key = hashlib.sha256(json.dumps([url, public_params], sort_keys=True).encode()).hexdigest()
     path = CACHE / "search" / f"{key}.json"
     if path.is_file() and time.time() - path.stat().st_mtime < 86400:
         return json.loads(path.read_text(encoding="utf-8"))
-    value = get(url, params=params, headers=headers)
+    if provider:
+        response, _ = rate_limiter.request_with_backoff(
+            "GET", url, provider_id=provider, params=params, headers=headers, timeout=(10, 30))
+        response.raise_for_status()
+        value = response.json()
+    else:
+        value = get(url, params=params, headers=headers)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
     return value
 
 
-def candidates(query, provider):
+def coverr_candidates(query):
+    key = secret("COVERR_API_KEY").strip()
+    if not key:
+        return
+    data = stock_get("https://api.coverr.co/videos",
+                     {"query": query, "page_size": 8, "urls": "true", "filter": "is_premium:false,-is_ai_generated:true"},
+                     headers={"x-api-key": key}, provider="coverr")
+    for item in data.get("hits", []):
+        url = item.get("urls", {}).get("mp4", "")
+        if item.get("is_premium") or item.get("is_ai_generated") or not url or "{token}" in url:
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != "storage.coverr.co":
+            continue
+        yield {"id": str(item["id"]), "kind": "video", "provider": "coverr", "title": item["title"],
+               "keywords": " ".join(item.get("tags") or []), "url": url,
+               "source": "https://coverr.co/videos/" + quote(str(item.get("slug") or item["id"]), safe=""),
+               "credit": "Footage from Coverr", "width": item.get("max_width", 0),
+               "height": item.get("max_height", 0)}
+
+
+def internet_archive_candidates(query):
+    escaped = re.sub(r'[^\w\s-]', ' ', query)
+    result = stock_get("https://archive.org/advancedsearch.php",
+                       {"q": f'mediatype:movies AND ({escaped}) AND (licenseurl:*publicdomain* OR rights:"public domain")',
+                        "fl[]": ["identifier", "title"], "rows": 5, "output": "json"},
+                       headers=COMMONS_HEADERS, provider="internet_archive")
+    for item in result.get("response", {}).get("docs", []):
+        identifier = item.get("identifier", "")
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", identifier) or identifier in {".", ".."}:
+            continue
+        try:
+            metadata = stock_get(f"https://archive.org/metadata/{identifier}", {},
+                                 headers=COMMONS_HEADERS, provider="internet_archive")
+        except (requests.RequestException, OSError, ValueError):
+            continue
+        info = metadata.get("metadata", {})
+        license_url = urlparse(str(info.get("licenseurl", "")))
+        public_domain = (license_url.hostname in ("creativecommons.org", "www.creativecommons.org")
+                         and license_url.path.startswith(("/publicdomain/mark/", "/publicdomain/zero/")))
+        if not public_domain and str(info.get("rights", "")).strip().casefold().rstrip(".") != "public domain":
+            continue
+        files = [file for file in metadata.get("files", []) if file.get("name", "").lower().endswith(".mp4")
+                 and str(file.get("size", "")).isdigit() and 0 < int(file["size"]) <= LIMIT
+                 and not file.get("private")]
+        if files:
+            file = max(files, key=lambda entry: int(entry["size"]))
+            yield {"id": identifier, "kind": "video", "provider": "internet_archive",
+                   "title": str(item.get("title") or identifier),
+                   "keywords": str(info.get("subject", "")),
+                   "source": f"https://archive.org/details/{identifier}", "credit": "Internet Archive · Public domain",
+                   "url": f'https://archive.org/download/{identifier}/{quote(file["name"], safe="")}'}
+
+
+def candidates(query, provider, *, media_type=None):
+    if media_type is None:
+        yield from candidates(query, provider, media_type="video")
+        yield from candidates(query, provider, media_type="image")
+        return
+    if provider in {"coverr", "internet_archive"}:
+        if media_type != "image":
+            yield from (coverr_candidates(query) if provider == "coverr" else internet_archive_candidates(query))
+        return
     if provider == "wikimedia":
+        search = f"{query} filetype:video" if media_type == "video" else query
         data = stock_get(COMMONS_API, {**COMMONS_INFO, "generator": "search", "gsrnamespace": 6,
-                                     "gsrsearch": query, "gsrlimit": 8}, headers=COMMONS_HEADERS)
+                                     "gsrsearch": search, "gsrlimit": 8}, headers=COMMONS_HEADERS, provider="wikimedia")
         for page in data.get("query", {}).get("pages", []):
             try:
-                yield dict(commons_candidate(page), provider="wikimedia")
+                item = commons_candidate(page)
+                if not media_type or item["kind"] == media_type:
+                    yield dict(item, provider="wikimedia")
             except ValueError:
                 continue
         return
     if provider == "nasa":
         data = stock_get("https://images-api.nasa.gov/search",
-                   params={"q": query, "media_type": "image,video", "page_size": 8})
+                    params={"q": query, "media_type": media_type, "page_size": 8}, provider="nasa")
         for item in data["collection"]["items"]:
             info = item["data"][0]
             yield {"id": info["nasa_id"], "kind": info["media_type"], "title": info["title"],
@@ -180,16 +255,19 @@ def candidates(query, provider):
         if not key:
             raise ValueError("Set the PEXELS_API_KEY in .env.")
         for kind, endpoint, field in (("video", "videos/search", "videos"), ("image", "search", "photos")):
+            if media_type and media_type != kind:
+                continue
             data = stock_get("https://api.pexels.com/v1/" + endpoint,
-                             {"query": query, "orientation": "portrait", "per_page": 5},
-                             headers={"Authorization": key})
+                              {"query": query, "per_page": 8},
+                              headers={**PEXELS_HEADERS, "Authorization": key}, provider="pexels")
             for item in data[field]:
                 if kind == "video":
                     files = [file for file in item["video_files"] if file.get("width") and file.get("height")
-                             and file["height"] > file["width"] and file.get("file_type") == "video/mp4"]
+                             and file.get("file_type") == "video/mp4"]
                     if not files:
                         continue
-                    file = min(files, key=lambda entry: (entry["width"] < 1080, abs(entry["width"] - 1080)))
+                    file = min(files, key=lambda entry: (entry["width"] >= entry["height"],
+                                                         abs(min(entry["width"], entry["height"]) - 1080)))
                     url, credit = file["link"], item["user"]["name"]
                     width, height = file["width"], file["height"]
                 else:
@@ -204,6 +282,8 @@ def candidates(query, provider):
     if not key:
         raise ValueError("Set the PIXABAY_API_KEY in .env.")
     for kind, endpoint in (("video", "videos/"), ("image", "")):
+        if media_type and media_type != kind:
+            continue
         params = {"key": key, "q": query[:100], "per_page": 8, "safesearch": "true"}
         if kind == "image":
             params.update(image_type="photo", min_width=640)
@@ -236,7 +316,7 @@ def cache(topic_id, record):
         collection = record["collection"]
         if urlparse(collection).hostname != "images-assets.nasa.gov":
             raise ValueError("Unexpected NASA asset collection host.")
-        assets = get(collection)
+        assets = stock_get(urlparse(collection)._replace(scheme="https").geturl(), {}, provider="nasa")
         extension = (".mp4",) if kind == "video" else (".jpg", ".jpeg", ".png")
         available = [urlparse(url)._replace(scheme="https").geturl() for url in assets
                      if urlparse(url).scheme in {"http", "https"}
@@ -257,7 +337,8 @@ def cache(topic_id, record):
         try:
             with requests.get(url, stream=True, timeout=(10, 60),
                               allow_redirects=not record.get("headers"),
-                              headers={**COMMONS_HEADERS, **record.get("headers", {})}) as response:
+                              headers={**(PEXELS_HEADERS if record.get("provider") == "pexels" else COMMONS_HEADERS),
+                                       **record.get("headers", {})}) as response:
                 response.raise_for_status()
                 with temporary.open("wb") as output:
                     count = 0
@@ -280,7 +361,8 @@ def cache(topic_id, record):
         finally:
             temporary.unlink(missing_ok=True)
     return {"file": filename, "kind": kind, "source": record["source"], "credit": record["credit"],
-            "synthetic": bool(record.get("synthetic")), "automatic": bool(record.get("automatic"))}
+            "synthetic": bool(record.get("synthetic")), "automatic": bool(record.get("automatic")),
+            "match_text": " ".join((record.get("title", ""), record.get("keywords", "")))}
 
 
 def illustration_request(query):
@@ -310,18 +392,20 @@ def matches_event_year(match, year):
     return year in dates if dates else bool(re.search(rf"\b{re.escape(year)}\b", match["title"]))
 
 
-def ranked_matches(query, providers, *, strict=False, event_year=""):
+def ranked_matches(query, providers, *, strict=False, event_year="", media_type=None):
     terms = set(keywords(query))
     if event_year:
         terms.discard(event_year)
     ranked = []
     for provider in providers:
         try:
-            matches = list(candidates(query, provider))
+            matches = list(candidates(query, provider, media_type=media_type))
         except (requests.RequestException, OSError, ValueError, KeyError, TypeError, IndexError):
             print(f"{provider}: search unavailable.", file=sys.stderr)
             continue
         for match in matches:
+            if media_type and match["kind"] != media_type:
+                continue
             words = set(keywords(match["title"] + " " + match.get("keywords", "")))
             overlap = len(terms & words)
             if overlap < min(len(terms), 3 if event_year else 2 if strict else 1):
@@ -335,7 +419,7 @@ def ranked_matches(query, providers, *, strict=False, event_year=""):
             video = match["kind"] == "video"
             vertical_video = video and portrait_hd
             near_target = video and 0 < width < height and closeness >= -.025
-            ranked.append(((near_target, vertical_video, overlap, video, shape, closeness, min(width, 2160)), match))
+            ranked.append(((video, near_target, vertical_video, overlap, shape, closeness, min(width, 2160)), match))
     return [match for _, match in sorted(ranked, key=lambda item: item[0], reverse=True)]
 
 
@@ -444,7 +528,8 @@ def beat_cache_records(manifest, specs):
     cached = {item["beat_id"]: item for item in manifest.get("beats", [])}
     return {spec["beat_id"]: cached[spec["beat_id"]]["asset"] for spec in specs
             if spec["beat_id"] in cached
-            and all(cached[spec["beat_id"]].get(key) == spec[key] for key in ("search_query", "visual_type"))
+            and all(cached[spec["beat_id"]].get(key) == spec.get(key)
+                    for key in ("search_query", "visual_type", "fallback_video_query"))
             and cached[spec["beat_id"]].get("asset")}
 
 
@@ -544,7 +629,7 @@ def select_relevant_candidates(topic, beats_by_id, candidate_pools, *, requests_
 
 
 def cache_storyboard(topic, *, requests_sent=None):
-    """Resolve missing shots from zero-quota archives first, then cached/deduped Pixabay + batched Gemini gate."""
+    """Prepare video candidates before considering photos for each footage beat."""
     topic_id = topic["id"]
     discovery = topic["discovery"]
     specs = discovery.get("beats")
@@ -577,49 +662,72 @@ def cache_storyboard(topic, *, requests_sent=None):
         stock.append("pixabay")
     if pexels_enabled() and secret("PEXELS_API_KEY"):
         stock.append("pexels")
-    archives = ["wikimedia"]
+    if secret("COVERR_API_KEY"):
+        stock.append("coverr")
+    archives = ["wikimedia", "internet_archive"]
     if re.search(r"\b(space|planet|moon|orbit|nasa|astronom\w*|mars|earth|solar|star\w*)\b",
                  topic["category"] + " " + topic["title"], re.I):
         archives.insert(0, "nasa")
     has_manim = find_spec("manim") is not None
     query_cache = {}
 
-    def lookup(search_text, providers, required_year, visual_type):
-        key = (normalize_query(search_text), tuple(providers), required_year, visual_type)
+    def lookup(search_text, providers, required_year, media_type):
+        key = (normalize_query(search_text), tuple(providers), required_year, media_type)
         if key not in query_cache:
-            found = ranked_matches(search_text, providers, strict=True, event_year=required_year)
-            if visual_type == "diagram":
-                found = [match for match in found if match["kind"] == "image"]
-            elif specs and visual_type == "stock_video" and not required_year:
-                found.sort(key=lambda match: match["kind"] != "video")
-            query_cache[key] = found
+            query_cache[key] = ranked_matches(search_text, providers, strict=True,
+                                               event_year=required_year, media_type=media_type)
         return query_cache[key]
+
+    def search(query, media_type, *, broad=False):
+        if event_year and not broad:
+            archive_query = query if event_year in keywords(query) else f"{query} {event_year}"
+            actual = lookup(archive_query, archives, event_year, media_type)
+            if actual:
+                illustrative = lookup(query, stock, "", media_type) if media_type == "video" else []
+                return actual + [dict(match, illustrative=True) for match in illustrative]
+        providers = [*archives, *stock]
+        matches = lookup(query, providers, "", media_type)
+        return [dict(match, illustrative=True) for match in matches] if event else matches
 
     beats_by_id = {beat["beat_id"]: beat for beat in requests_by_beat}
     candidate_pools = {}
-    candidate_meta = {}
     for beat in requests_by_beat:
         index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
-        if index in shots or not query or visual_type == "callout_card":
+        if shots.get(index, {}).get("kind") == "video" or not query or visual_type == "callout_card":
             continue
         if visual_type == "diagram" and beat.get("diagram") and has_manim:
             continue
-        archive_search = query if not event_year or event_year in keywords(query) else f"{query} {event_year}"
-        matches = lookup(archive_search, archives, event_year, visual_type)
-        is_stock = False
-        if not matches and stock:
-            matches = lookup(query, stock, "", visual_type)
-            is_stock = bool(matches)
+        matches = search(query, "video")
+        fallback = beat.get("fallback_video_query")
+        if not matches and fallback and normalize_query(fallback) != normalize_query(query):
+            matches = search(fallback, "video", broad=True)
         if matches:
             candidate_pools[index] = matches[:3]
-            candidate_meta[index] = is_stock
 
     selections = select_relevant_candidates(topic, beats_by_id, candidate_pools, requests_sent=requests_sent)
     used = {record["source"] for record in shots.values()}
     used_files = {record["file"] for record in shots.values()}
+
+    def store_match(index, matches):
+        for match in islice(matches, 6):
+            if match["source"] in used:
+                continue
+            try:
+                asset = cache(topic_id, dict(match, automatic=True))
+            except (requests.RequestException, OSError, ValueError):
+                continue
+            if asset["file"] in used_files:
+                continue
+            if match.get("illustrative"):
+                asset["context_label"] = "ILLUSTRATIVE STOCK"
+            shots[index] = asset
+            used.add(asset["source"])
+            used_files.add(asset["file"])
+            return
+
     for beat in requests_by_beat:
         index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
-        if index in shots or not query or visual_type == "callout_card":
+        if shots.get(index, {}).get("kind") == "video" or not query or visual_type == "callout_card":
             continue
         if visual_type == "diagram" and beat.get("diagram") and has_manim:
             continue
@@ -627,22 +735,13 @@ def cache_storyboard(topic, *, requests_sent=None):
         if index in candidate_pools and choice >= 0:
             pool = candidate_pools[index]
             ordered = [pool[choice]] + [item for i, item in enumerate(pool) if i != choice]
-            for match in ordered:
-                if match["source"] in used:
-                    continue
-                try:
-                    asset = cache(topic_id, dict(match, automatic=True))
-                except (requests.RequestException, OSError, ValueError):
-                    continue
-                if asset["file"] in used_files:
-                    continue
-                if event and candidate_meta.get(index):
-                    asset["context_label"] = "ILLUSTRATIVE STOCK"
-                shots[index] = asset
-                used.add(asset["source"])
-                used_files.add(asset["file"])
-                break
-        if index not in shots and choice != -1 and secret("POLLINATIONS_ZERO_COST_MODEL").strip():
+            store_match(index, ordered)
+            fallback = beat.get("fallback_video_query")
+            if shots.get(index, {}).get("kind") != "video" and fallback and normalize_query(fallback) != normalize_query(query):
+                store_match(index, search(fallback, "video", broad=True))
+        if index not in shots:
+            store_match(index, search(query, "image"))
+        if index not in shots and secret("POLLINATIONS_ZERO_COST_MODEL").strip():
             try:
                 asset = cache(topic_id, dict(illustration_request(query), automatic=True))
                 if asset["file"] not in used_files:
@@ -674,7 +773,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("topic", choices=[topic["id"] for topic in shorts.read_json(shorts.ROOT / "topics.json")])
     parser.add_argument("query")
-    parser.add_argument("--provider", choices=("nasa", "wikimedia", "pexels", "pixabay", "pollinations"))
+    parser.add_argument("--provider", choices=("nasa", "wikimedia", "internet_archive", "coverr",
+                                               "pexels", "pixabay", "pollinations"))
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--use", metavar="ID", help="Cache the reviewed match, or use 'generate' for Pollinations")
     selection.add_argument("--auto", action="store_true", help="Rank matches and cache the best available visual")
@@ -690,10 +790,11 @@ def main():
             if args.provider == "pexels" and not pexels_enabled():
                 raise ValueError("Pexels is disabled (ENABLE_PEXELS=false).")
             providers = [args.provider] if args.provider else [
-                name for name in ("nasa", "wikimedia", "pixabay", "pexels")
-                if name in {"nasa", "wikimedia"}
+                name for name in ("nasa", "wikimedia", "internet_archive", "pixabay", "pexels", "coverr")
+                if name in {"nasa", "wikimedia", "internet_archive"}
                 or (name == "pixabay" and secret("PIXABAY_API_KEY"))
                 or (name == "pexels" and pexels_enabled() and secret("PEXELS_API_KEY"))
+                or (name == "coverr" and secret("COVERR_API_KEY"))
             ]
             selected_asset = cache_best(args.topic, args.query, providers, args.pollinations_fallback)
         elif provider == "pollinations":

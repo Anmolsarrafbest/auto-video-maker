@@ -20,6 +20,7 @@ from local_secrets import secret
 from local_voices import windows_pcm
 from production import HINDI, INDIAN_ENGLISH, SCORES, treatment
 from storyboard import CLIPS, episode, resolve_visual_timeline
+from visuals import keywords
 import footage
 
 WIDTH, HEIGHT = 720, 1280
@@ -40,10 +41,10 @@ PALETTES = {
 }
 
 DELIVERY = {
-    "documentary": (1.05, .50, .36),
-    "precise": (.94, .42, .23),
-    "curious": (.99, .57, .42),
-    "gentle": (1.08, .46, .32),
+    "documentary": (.50, .36),
+    "precise": (.42, .23),
+    "curious": (.57, .42),
+    "gentle": (.46, .32),
 }
 
 
@@ -69,7 +70,7 @@ def spoken_plan(topic, beats):
     if len(parts) > 1 and len(parts[0].split()) < 4:
         parts[:2] = [" ".join(parts[:2])]
     reveal_gap = ANSWER_PAUSE if question else .25
-    return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
+    return plan + [("answer", text, reveal_gap if i == 0 else .20) for i, text in enumerate(parts)]
 
 
 def font(size, bold=False, serif=False):
@@ -554,6 +555,9 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         else:
             sequence, portrait = record["images"], record["portrait"]
         segment["rendered_as"] = classification
+        if classification == "video" and "window_end" in record:
+            segment["source_start_time"] = record["window_start"]
+            segment["source_end_time"] = record["window_end"]
         prior_id = previous_photos[slot]
         prior_file = storyboard.get(prior_id, {}).get("path")
         repeated_photo = bool(classification == "image" and prior_file and prior_file == record["path"])
@@ -713,15 +717,27 @@ def _trim_pcm_silence(pcm, rate, threshold=320, pad_ms=45):
     return samples[start:end].tobytes()
 
 
+def narration_speed():
+    raw = secret("NARRATION_SPEED").strip() or "1.0"
+    try:
+        speed = float(raw)
+    except ValueError:
+        speed = 0
+    if not .5 <= speed <= 2:
+        raise ValueError("NARRATION_SPEED must be a number from 0.5 to 2.0.")
+    return speed
+
+
 def narration(beats, seconds, voice_path, destination, *, topic=None):
     topic = topic or {}
     plan = spoken_plan(topic, beats)
     gaps = [gap for _, _, gap in plan]
     direction = treatment(topic)
-    speed, expression, rhythm = DELIVERY[direction["delivery"]]
+    expression, rhythm = DELIVERY[direction["delivery"]]
+    speed = narration_speed()
     kokoro_voice = direction.get("kokoro_voice")
 
-    def fit_narration():
+    def synthesize_plan():
         if kokoro_voice:
             from local_voices import kokoro_pcm, load_kokoro
 
@@ -734,8 +750,7 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
                 raise ValueError("Piper voice is missing. Run python shorts.py setup-voice first.")
             voice = PiperVoice.load(voice_path, use_cuda=False)
 
-        def synthesize(index, role, line, pace):
-            length = pace * speed * (1.06 if role == "pause" else 1)
+        def synthesize(index, role, line):
             if direction["voice"] == HINDI:
                 recording = voice_path.parent.parent / "voiceovers" / topic["id"] / f"{index:02}.wav"
                 if not recording.is_file():
@@ -745,58 +760,77 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
                         raise ValueError("Use mono, 16-bit PCM WAV recordings.")
                     return wav.getframerate(), wav.readframes(wav.getnframes())
             if direction["voice"] == INDIAN_ENGLISH:
-                return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
-            if role == "hook":
-                length *= .96
+                return windows_pcm(line, INDIAN_ENGLISH, speed, destination.parent)
             pad_ms = 15 if (topic.get("loop") and index == len(plan)) else 45
             if kokoro_voice:
-                rate, pcm = kokoro_pcm(voice, line, kokoro_voice, min(1.45, 1 / length), kokoro_dir)
+                rate, pcm = kokoro_pcm(voice, line, kokoro_voice, speed, kokoro_dir)
                 return rate, _trim_pcm_silence(pcm, rate, pad_ms=pad_ms)
-            config = SynthesisConfig(length_scale=length, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
+            config = SynthesisConfig(length_scale=1.03 / speed, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
                                      volume=.90 if role == "pause" else 1)
             chunks = voice.synthesize(line, syn_config=config)
             rate = voice.config.sample_rate
             pcm = b"".join(chunk.audio_int16_bytes for chunk in chunks)
             return rate, _trim_pcm_silence(pcm, rate, pad_ms=pad_ms)
 
-        for pace in ((1,) if direction["voice"] == HINDI else (1, .92, .84, .76)):
-            rates, clips = zip(*(synthesize(i, role, line, pace)
-                                 for i, (role, line, _) in enumerate(plan, 1)))
-            rate = rates[0]
-            if any(value != rate for value in rates):
-                raise ValueError("Narration chunks have inconsistent sample rates.")
-            if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - (.04 if topic.get("loop") else .18):
-                return rate, clips
-        raise ValueError("Narration does not fit the selected duration. Try a longer duration.")
+        rates, clips = zip(*(synthesize(i, role, line) for i, (role, line, _) in enumerate(plan, 1)))
+        if not all(clips) or len(set(rates)) != 1:
+            raise ValueError("Narration has empty chunks or inconsistent sample rates.")
+        return rates[0], clips
 
-    rate, clips = fit_narration()
-    audio = bytearray(2 * round(rate * seconds))
+    rate, clips = synthesize_plan()
+    audio = bytearray()
     timings = []
     end = 0
     for gap, clip in zip(gaps, clips):
         start = end + round(gap * rate)
         end = start + len(clip) // 2
-        audio[2 * start:2 * start + len(clip)] = clip
+        audio.extend(bytes(2 * round(gap * rate)))
+        audio.extend(clip)
         timings.append((start / rate, end / rate))
+    reserve = .04 if topic.get("loop") else OUTRO_SECONDS
+    padded_seconds = max(seconds, math.ceil(end / rate + reserve))
+    audio.extend(bytes(2 * round(padded_seconds * rate) - len(audio)))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
         wav.writeframes(audio)
-    if direction["voice"] != HINDI:
-        # Preserve pitch and reserve the end card. Cap the slowdown so the
-        # caller can shorten the export when the script still ends early.
-        reserve = .04 if topic.get("loop") else OUTRO_SECONDS + .05
-        stretch = min(1.18, (seconds - reserve) / timings[-1][1])
-        if stretch < 1 or (not topic.get("loop") and stretch >= 1.04):
-            import imageio_ffmpeg
-
-            adjusted = destination.with_suffix(".paced.wav")
-            ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
-            subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(destination),
-                            "-af", f"atempo={1 / stretch:.8f},apad", "-t", str(seconds),
-                            str(adjusted)], check=True)
-            adjusted.replace(destination)
-            timings = [(start * stretch, end * stretch) for start, end in timings]
     return timings
+
+
+def plan_video_windows(storyboard, timeline, duration_for):
+    """Reuse suitable downloaded clips without giving two beats the same source window."""
+    planned = dict(storyboard)
+    specs = {segment["beat_id"]: segment for segment in timeline}
+    videos = {key: asset for key, asset in storyboard.items() if asset["kind"] == "video"}
+    used_until, durations = {}, {}
+    for key, asset in videos.items():
+        path = asset["path"]
+        if path not in durations:
+            durations[path] = duration_for(path)
+        duration = durations[path]
+        start = used_until.get(path, 0)
+        end = min(start + 4, duration) if duration else start + 4
+        if end <= start:
+            planned.pop(key, None)
+            continue
+        planned[key] = dict(asset, window_start=start, window_end=end)
+        used_until[path] = end
+    for key, spec in specs.items():
+        previous = planned.get(key)
+        if (previous and previous["kind"] == "video") or spec.get("visual_type") in {"diagram", "callout_card"}:
+            continue
+        queries = [set(keywords(spec.get(field, ""))) for field in ("search_query", "fallback_video_query")]
+        for source_id, asset in videos.items():
+            path = asset["path"]
+            if durations[path] <= 10 or used_until[path] + 4 > durations[path]:
+                continue
+            match_text = set(keywords(asset.get("match_text", "") or specs.get(source_id, {}).get("search_query", "")))
+            if not any(query and len(query & match_text) >= min(2, len(query)) for query in queries):
+                continue
+            start = used_until[path]
+            planned[key] = dict(asset, window_start=start, window_end=start + 4, fallback_asset=previous)
+            used_until[path] += 4
+            break
+    return planned
 
 
 def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *,
@@ -828,7 +862,10 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
         try:
             if record["kind"] == "video":
                 portrait = footage.is_portrait(ffmpeg, record["path"])
-                images = footage.decode_frames(ffmpeg, record["path"], 12, portrait=portrait)
+                offset = record.get("window_start", 0)
+                duration = record.get("window_end", offset + 4) - offset
+                images = footage.decode_frames(ffmpeg, record["path"], 12, portrait=portrait,
+                                               offset=offset, duration=duration)
                 if not images:
                     raise ValueError("Empty clip")
             else:
@@ -836,6 +873,9 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
                     images = [original.convert("RGB")]
                 portrait = images[0].height > images[0].width
         except (OSError, ValueError):
+            if fallback := record.get("fallback_asset"):
+                storyboard[beat_id] = fallback
+                return load_visual(beat_id)
             failed_assets.add(beat_id)
             print(f"Could not decode visual beat {beat_id}; using motion graphics.")
             return None
@@ -877,6 +917,8 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     plan = spoken_plan(topic, beats)
     word_lines, caption_timing = build_word_timeline(wav_path, topic.get("language", "en"), plan, timings)
     visual_timeline = resolve_visual_timeline(topic, word_lines, plan, timings, seconds)
+    storyboard = plan_video_windows(
+        storyboard, visual_timeline, lambda path: footage.video_duration(ffmpeg, path))
     specs = {item["beat_id"]: item["diagram"] for item in visual_timeline if item.get("diagram")}
     failed_diagrams = set()
 

@@ -397,6 +397,12 @@ def normalize_discovery_beats(beats, title, category):
             " ".join(visuals.keywords(anchor) or [anchor]),
             category_keywords,
         )
+        if "fallback_video_query" in item:
+            fallback = " ".join(visuals.keywords(str(item["fallback_video_query"] or ""))[:2])
+            if fallback:
+                item["fallback_video_query"] = fallback
+            else:
+                item.pop("fallback_video_query")
         if "callout_stat" in item:
             item["callout_stat"] = _fit_line(item.get("callout_stat"), 38)
         if "diagram" in item:
@@ -454,7 +460,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         "Strictly ban generic openings such as 'Did you know', 'In this video', or 'Have you ever wondered'. "
         "Beat 0 must open immediately with a concrete visual hook or surprising contrast paired with a punchy callout_stat. "
         "Then explain how we know and end with a surprising takeaway. Use a declarative hook. "
-        f"Target {int((seconds - reserved) * 2.5)} to {int((seconds - reserved) * 2.9)} "
+        f"Target {round((seconds - reserved) * 2.2)} to {round((seconds - reserved) * 2.4)} "
         "total spoken words for hook and explanation. "
         f"{ending_instruction}"
         "Use the time for a concrete detail or example supported by the source. Avoid filler or repeating the hook. "
@@ -464,6 +470,9 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         "explanation using 2–5 consecutive spoken words. Anchor Beat 0 to the opening words and supply its callout_stat. "
         "Give each explanation step a separate beat so it has its own visual. "
         "Choose visual_type from archival, stock_video, diagram, callout_card. "
+        "Make at least 75 percent of beats archival or stock_video, preferably 80 percent or more. "
+        "Use at most one or two diagram or callout_card beats for ideas footage cannot show well. "
+        "Give video beats an optional one- or two-word fallback_video_query for broader relevant footage. "
         "For a diagram beat supply diagram data with a template: timeline, comparison, or process. "
         "Give it a short title and 2–4 ordered items, each with a label. "
         "For comparison, each item also needs a sourced nonnegative numerical value in the same unit. "
@@ -500,6 +509,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                                         "anchor_text": {"type": "STRING"},
                                         "visual_type": {"type": "STRING", "enum": list(VISUAL_TYPES)},
                                         "search_query": {"type": "STRING"},
+                                          "fallback_video_query": {"type": "STRING"},
                                         "callout_stat": {"type": "STRING"},
                                         "diagram": {"type": "OBJECT", "properties": {
                                             "template": {"type": "STRING", "enum": list(DIAGRAM_TEMPLATES)},
@@ -538,10 +548,10 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                 correction = ("\nDo not start the hook with generic phrases like 'Did you know', "
                               "'In this video', or 'Have you ever wondered'. Open with a concrete visual hook.")
                 continue
-            if sum(len(result[name].split()) for name in ("hook", "explanation")) > int(seconds * 3.1):
+            if sum(len(result[name].split()) for name in ("hook", "explanation")) > math.ceil((seconds - reserved) * 2.4):
                 if attempt == max_attempts - 1:
                     raise ValueError("Gemini repeatedly returned narration that was too long.")
-                correction = (f"\nReturn the complete plan again with at most {int(seconds * 2.5)} spoken words. "
+                correction = (f"\nReturn the complete plan again with at most {math.ceil((seconds - reserved) * 2.4)} spoken words. "
                               "Count only the hook and explanation.")
                 continue
             normalized_beats = normalize_discovery_beats(
@@ -658,7 +668,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         except ValueError:
             if beats == topic["beats"] and not episode_plan:
                 raise
-            print("The Gemini narration did not fit. Using sourced narration.", file=sys.stderr)
+            print("The Gemini narration could not be synthesized. Using sourced narration.", file=sys.stderr)
             beats = topic["beats"]
             if episode_plan:
                 topic = {key: value for key, value in topic.items()
@@ -667,11 +677,11 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             timings = write_audio(beats)
         narration_end = timings[-1][1]
         if topic.get("loop"):
-            seconds = min(seconds, round(narration_end + .04, 3))
+            seconds = round(narration_end + .04, 3)
             if seconds != target_seconds:
-                print(f"Trimming loop duration to narration end ({target_seconds}s target, {seconds}s export).")
+                print(f"Setting loop duration from narration ({target_seconds}s target, {seconds}s export).")
         else:
-            seconds = min(seconds, math.ceil(narration_end + OUTRO_SECONDS))
+            seconds = math.ceil(narration_end + OUTRO_SECONDS)
             if seconds != target_seconds:
                 print(f"Ending after the recap and follow card ({target_seconds}s target, {seconds}s export).")
         brief = flow_prompt(topic, timings, seconds, spoken_plan(topic, beats), "clip_source" in direction)

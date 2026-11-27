@@ -133,6 +133,12 @@ def validate_visual_beats(beats, narration, seconds):
             raise ValueError(f"Beat {beat_id} callout must fit on one short line.")
         record = {"beat_id": beat_id, "anchor_text": anchor.strip(), "visual_type": kind,
                   "search_query": query.strip(), **({"callout_stat": stat.strip()} if stat.strip() else {})}
+        fallback = beat.get("fallback_video_query", "")
+        if fallback != "":
+            if (not isinstance(fallback, str) or len(fallback) > 48
+                    or not re.fullmatch(r"[\w'-]+(?: [\w'-]+)?", fallback.strip())):
+                raise ValueError(f"Beat {beat_id} needs a 1–2 word fallback video query.")
+            record["fallback_video_query"] = fallback.strip()
         if "diagram" in beat:
             if kind != "diagram":
                 raise ValueError("Diagram data belongs on a diagram beat.")
@@ -144,6 +150,7 @@ def validate_visual_beats(beats, narration, seconds):
 def visual_beat_text(beats):
     for beat in beats:
         yield beat["search_query"]
+        yield beat.get("fallback_video_query", "")
         yield beat.get("callout_stat", "")
         if diagram := beat.get("diagram"):
             yield diagram["title"]

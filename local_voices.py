@@ -76,6 +76,8 @@ def kokoro_pcm(engine, text, voice, speed, scratch):
     inputs = {item.name: item.type for item in engine.sess.get_inputs()}
     token_input = "input_ids" if "input_ids" in inputs else "tokens"
     speed_type = np.int32 if inputs["speed"] == "tensor(int32)" else np.float32
+    if speed_type is np.int32:
+        speed = max(1, round(speed))
     samples = engine.sess.run(None, {
         token_input: np.asarray([[0, *tokens, 0]], dtype=np.int64),
         "style": np.asarray(shape, dtype=np.float32),

@@ -19,6 +19,11 @@ PROVIDER_LIMITS = {
     "gemini-3.1-flash-lite": {"min_interval": 4.5, "daily_cap": 450, "warn_at": 400},
     "gemini-4-hydrogen": {"min_interval": 13.0, "daily_cap": 18, "warn_at": 15},
     "pixabay": {"min_interval": 0.7, "daily_cap": None, "warn_at": None},
+    "coverr": {"min_interval": 0.5, "daily_cap": None, "warn_at": None, "hourly_cap": 50},
+    "internet_archive": {"min_interval": 1.0, "daily_cap": None, "warn_at": None},
+    "pexels": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
+    "wikimedia": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
+    "nasa": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
 }
 
 
@@ -34,7 +39,8 @@ def _load_state(today):
                 counts = data.get("counts", {}) if data.get("date") == today else {}
                 last_called = data.get("last_called", {})
                 if isinstance(counts, dict) and isinstance(last_called, dict):
-                    return {"date": today, "counts": counts, "last_called": last_called}
+                    return {"date": today, "counts": counts, "last_called": last_called,
+                            "coverr_hour": data.get("coverr_hour", [])}
         except (OSError, ValueError):
             pass
     return {"date": today, "counts": {}, "last_called": {}}
@@ -89,6 +95,11 @@ def reserve_slot(provider_id, *, fallback_provider=None):
         if last > now + 5:
             last = now
         target = max(now, last + limits["min_interval"])
+        if "hourly_cap" in limits:
+            recent = [stamp for stamp in state.get("coverr_hour", []) if stamp > target - 3600]
+            if len(recent) >= limits["hourly_cap"]:
+                raise ValueError(f"Hourly quota cap reached for {active}.")
+            state["coverr_hour"] = [*recent, target]
         wait_seconds = max(0.0, target - now)
         state["last_called"][active] = target
         state["counts"][active] = count + 1
