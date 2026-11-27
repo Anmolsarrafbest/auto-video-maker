@@ -135,6 +135,56 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(sent, ["discord", "telegram"])
         self.assertEqual(post.call_count, 2)
 
+    def test_ntfy_priority_actions_and_unset_skip(self):
+        with patch.object(notify, "secret", return_value=""), patch.object(notify.requests, "post") as post:
+            sent = notify.notify_run(
+                status="success",
+                summary={"attempted": 1, "completed_renders": 1, "published": 1, "items": [
+                    {"title": "Wombat Cubes", "youtube_url": "https://youtu.be/abc"}
+                ]},
+                run_url="https://github.com/org/repo/actions/runs/42",
+            )
+        self.assertEqual(sent, [])
+        post.assert_not_called()
+
+        ok_resp = Mock()
+        ok_resp.raise_for_status = Mock()
+        with patch.object(notify, "secret", side_effect=lambda name: "my-secret-topic" if name == "NTFY_TOPIC" else ""), \
+                patch.object(notify.requests, "post", return_value=ok_resp) as post:
+            sent = notify.notify_run(
+                status="success",
+                summary={"attempted": 2, "completed_renders": 2, "published": 2, "items": [
+                    {"title": "Wombat Cubes", "youtube_url": "https://youtu.be/abc"}
+                ]},
+                run_url="https://github.com/org/repo/actions/runs/42",
+            )
+        self.assertEqual(sent, ["ntfy"])
+        url, kwargs = post.call_args.args[0], post.call_args.kwargs
+        self.assertEqual(url, "https://ntfy.sh/my-secret-topic")
+        self.assertEqual(kwargs["headers"]["Priority"], "3")
+        self.assertEqual(kwargs["headers"]["Title"], "Auto Video Maker: 2 video(s) uploaded")
+        self.assertEqual(kwargs["headers"]["Tags"], "white_check_mark,clapper")
+        self.assertEqual(kwargs["headers"]["Actions"], "view, Open Video, https://youtu.be/abc, clear=true")
+
+        with patch.object(notify, "secret", side_effect=lambda name: "my-secret-topic" if name == "NTFY_TOPIC" else ""), \
+                patch.object(notify.requests, "post", return_value=ok_resp) as post:
+            notify.notify_run(
+                status="failure",
+                summary={"attempted": 1, "completed_renders": 0, "published": 0, "items": [
+                    {"title": "Broken", "qa_skipped": True, "error": "Missing audio"}
+                ]},
+                run_url="https://github.com/org/repo/actions/runs/99",
+            )
+        kwargs = post.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Priority"], "5")
+        self.assertEqual(kwargs["headers"]["Title"], "Auto Video Maker: Run Failed")
+        self.assertEqual(kwargs["headers"]["Tags"], "rotating_light,warning")
+        self.assertEqual(kwargs["headers"]["Actions"], "view, Open Run Logs, https://github.com/org/repo/actions/runs/99, clear=true")
+
+        summary, summary_text = notify._resolve_summary_input("Uploaded 1 draft cleanly")
+        self.assertEqual(summary, {})
+        self.assertEqual(summary_text, "Uploaded 1 draft cleanly")
+
 
 if __name__ == "__main__":
     unittest.main()
