@@ -87,7 +87,7 @@ def font(size, bold=False, serif=False):
 def motion_cues(topic, beats, timings, seconds):
     reveal = next(start for (role, _, _), (start, _) in zip(spoken_plan(topic, beats), timings)
                   if role == "answer")
-    return (reveal, seconds - OUTRO_SECONDS)
+    return (reveal, seconds if topic.get("loop") else seconds - OUTRO_SECONDS)
 
 
 def wrap(text, face, width):
@@ -571,7 +571,8 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         return (place_visual(shot, native_size(0, 294), time, portrait=portrait),
                 record.get("context_label") if record else None)
 
-    for index in range(seconds * FPS):
+    total_frames = max(1, round(seconds * FPS))
+    for index in range(total_frames):
         time = index / FPS
         recap = time >= recap_start
         replay = topic["id"] == "rainbow-split" and bool(diagram) and outro - recap_start >= 2.4 and recap
@@ -689,13 +690,13 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
                                (x + side * 24, 803)), fill=accent, width=3)
             else:
                 draw.line((360 - span, 791, 360 + span, 791), fill=accent, width=3)
-        if time >= outro:
+        if not topic.get("loop") and time >= outro:
             progress = min(1, (time - outro) / .35)
             y = 930 + round(8 * (1 - progress) ** 3)
             draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
             draw.text((360, y + 30), END_CARD, font=native_font(27, True), fill="#F7F3EA", anchor="mm")
         draw.rectangle((0, 0, WIDTH, 3), fill=base)
-        draw.rectangle((0, 0, WIDTH * (index + 1) / (seconds * FPS), 3), fill=accent)
+        draw.rectangle((0, 0, WIDTH * (index + 1) / total_frames, 3), fill=accent)
         yield img
 
 
@@ -747,15 +748,16 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
                 return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
             if role == "hook":
                 length *= .96
+            pad_ms = 15 if (topic.get("loop") and index == len(plan)) else 45
             if kokoro_voice:
                 rate, pcm = kokoro_pcm(voice, line, kokoro_voice, min(1.45, 1 / length), kokoro_dir)
-                return rate, _trim_pcm_silence(pcm, rate)
+                return rate, _trim_pcm_silence(pcm, rate, pad_ms=pad_ms)
             config = SynthesisConfig(length_scale=length, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
                                      volume=.90 if role == "pause" else 1)
             chunks = voice.synthesize(line, syn_config=config)
             rate = voice.config.sample_rate
             pcm = b"".join(chunk.audio_int16_bytes for chunk in chunks)
-            return rate, _trim_pcm_silence(pcm, rate)
+            return rate, _trim_pcm_silence(pcm, rate, pad_ms=pad_ms)
 
         for pace in ((1,) if direction["voice"] == HINDI else (1, .92, .84, .76)):
             rates, clips = zip(*(synthesize(i, role, line, pace)
@@ -763,12 +765,12 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
             rate = rates[0]
             if any(value != rate for value in rates):
                 raise ValueError("Narration chunks have inconsistent sample rates.")
-            if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - .18:
+            if all(clips) and sum(len(clip) / (2 * rate) for clip in clips) + sum(gaps) <= seconds - (.04 if topic.get("loop") else .18):
                 return rate, clips
         raise ValueError("Narration does not fit the selected duration. Try a longer duration.")
 
     rate, clips = fit_narration()
-    audio = bytearray(2 * rate * seconds)
+    audio = bytearray(2 * round(rate * seconds))
     timings = []
     end = 0
     for gap, clip in zip(gaps, clips):
@@ -782,8 +784,9 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     if direction["voice"] != HINDI:
         # Preserve pitch and reserve the end card. Cap the slowdown so the
         # caller can shorten the export when the script still ends early.
-        stretch = min(1.18, (seconds - OUTRO_SECONDS - .05) / timings[-1][1])
-        if stretch < 1 or stretch >= 1.04:
+        reserve = .04 if topic.get("loop") else OUTRO_SECONDS + .05
+        stretch = min(1.18, (seconds - reserve) / timings[-1][1])
+        if stretch < 1 or (not topic.get("loop") and stretch >= 1.04):
             import imageio_ffmpeg
 
             adjusted = destination.with_suffix(".paced.wav")

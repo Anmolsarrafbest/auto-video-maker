@@ -4,6 +4,7 @@ import argparse
 import hashlib
 from html import unescape
 from itertools import islice
+from importlib.util import find_spec
 import json
 from pathlib import Path
 import re
@@ -18,9 +19,11 @@ if __name__ == "__main__":
 from PIL import Image, ImageOps
 import requests
 
-from local_secrets import secret
+from local_secrets import flag, secret
+import rate_limiter
 
 CACHE = Path(__file__).resolve().parent / "assets-cache" / "visuals"
+PIXABAY_CACHE = Path(__file__).resolve().parent / "assets-cache" / "pixabay_search_cache"
 LIMIT = 40 * 1024 * 1024
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 COMMONS_HEADERS = {"User-Agent": "AutoVideoMaker/1.1 (https://github.com/Anmolsarrafbest/auto-video-maker)"}
@@ -104,6 +107,39 @@ def get(url, **kwargs):
     return response.json()
 
 
+def pexels_enabled():
+    return flag("ENABLE_PEXELS", default=False)
+
+
+def normalize_query(query):
+    return " ".join(query.strip().casefold().split())
+
+
+def pixabay_cache_path(query, media_type):
+    digest = hashlib.sha256(json.dumps([normalize_query(query), media_type]).encode()).hexdigest()
+    return PIXABAY_CACHE / f"{media_type}-{digest}.json"
+
+
+def pixabay_get(endpoint, params, media_type):
+    path = pixabay_cache_path(params["q"], media_type)
+    if path.is_file() and time.time() - path.stat().st_mtime < 86400:
+        return json.loads(path.read_text(encoding="utf-8"))
+    response, _ = rate_limiter.request_with_backoff(
+        "GET",
+        "https://pixabay.com/api/" + endpoint,
+        provider_id="pixabay",
+        params=params,
+        timeout=(10, 30),
+    )
+    response.raise_for_status()
+    value = response.json()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value), encoding="utf-8")
+    temporary.replace(path)
+    return value
+
+
 def stock_get(url, params, headers=None):
     public_params = {name: value for name, value in params.items() if name != "key"}
     key = hashlib.sha256(json.dumps([url, public_params], sort_keys=True).encode()).hexdigest()
@@ -122,7 +158,7 @@ def candidates(query, provider):
                                      "gsrsearch": query, "gsrlimit": 8}, headers=COMMONS_HEADERS)
         for page in data.get("query", {}).get("pages", []):
             try:
-                yield commons_candidate(page)
+                yield dict(commons_candidate(page), provider="wikimedia")
             except ValueError:
                 continue
         return
@@ -132,14 +168,17 @@ def candidates(query, provider):
         for item in data["collection"]["items"]:
             info = item["data"][0]
             yield {"id": info["nasa_id"], "kind": info["media_type"], "title": info["title"],
+                   "provider": "nasa",
                    "source": "https://images.nasa.gov/details/" + quote(info["nasa_id"], safe=""),
                    "credit": info.get("photographer") or info.get("center") or "NASA",
                    "collection": item["href"], "keywords": " ".join(info.get("keywords") or ())}
         return
-    key = secret("PEXELS_API_KEY" if provider == "pexels" else "PIXABAY_API_KEY")
-    if not key:
-        raise ValueError(f"Set the {provider.upper()}_API_KEY in .env.")
     if provider == "pexels":
+        if not pexels_enabled():
+            return
+        key = secret("PEXELS_API_KEY")
+        if not key:
+            raise ValueError("Set the PEXELS_API_KEY in .env.")
         for kind, endpoint, field in (("video", "videos/search", "videos"), ("image", "search", "photos")):
             data = stock_get("https://api.pexels.com/v1/" + endpoint,
                              {"query": query, "orientation": "portrait", "per_page": 5},
@@ -157,16 +196,19 @@ def candidates(query, provider):
                     url, credit = item["src"]["large2x"], item["photographer"]
                     width, height = item["width"], item["height"]
                 title = item.get("alt") or urlparse(item["url"]).path.strip("/").replace("-", " ")
-                yield {"id": str(item["id"]), "kind": kind, "title": title,
+                yield {"id": str(item["id"]), "kind": kind, "title": title, "provider": "pexels",
                        "source": item["url"], "credit": f"{credit} / Pexels", "url": url,
                        "width": width, "height": height}
         return
+    key = secret("PIXABAY_API_KEY")
+    if not key:
+        raise ValueError("Set the PIXABAY_API_KEY in .env.")
     for kind, endpoint in (("video", "videos/"), ("image", "")):
         params = {"key": key, "q": query[:100], "per_page": 8, "safesearch": "true"}
         if kind == "image":
             params.update(image_type="photo", min_width=640)
         try:
-            hits = stock_get("https://pixabay.com/api/" + endpoint, params)["hits"]
+            hits = pixabay_get(endpoint, params, kind)["hits"]
         except (requests.RequestException, OSError, ValueError, KeyError):
             print(f"pixabay: {kind} search unavailable.", file=sys.stderr)
             continue
@@ -183,7 +225,7 @@ def candidates(query, provider):
             else:
                 url = item["largeImageURL"]
                 width, height = item["imageWidth"], item["imageHeight"]
-            yield {"id": str(item["id"]), "kind": kind, "title": item["tags"],
+            yield {"id": str(item["id"]), "kind": kind, "title": item["tags"], "provider": "pixabay",
                    "source": item["pageURL"], "credit": f"{item['user']} / Pixabay", "url": url,
                    "width": width, "height": height}
 
@@ -410,8 +452,97 @@ def selected_storyboard(topic):
     return {key: asset for key, record in records.items() if (asset := local_asset(record))}, local_asset(manifest.get("icon"))
 
 
-def cache_storyboard(topic):
-    """Resolve missing shots from public providers while retaining explicitly supplied media."""
+def select_relevant_candidates(topic, beats_by_id, candidate_pools, *, requests_sent=None):
+    """Score top media candidates across all beats in one batched Gemini Flash Lite call."""
+    if not candidate_pools:
+        return {}
+    key = secret("GEMINI_FREE_API_KEY").strip()
+    if not key:
+        return {beat_id: 0 for beat_id in candidate_pools}
+    batched = []
+    for beat_id, pool in candidate_pools.items():
+        beat = beats_by_id[beat_id]
+        batched.append({
+            "beat_id": beat_id,
+            "anchor_text": beat.get("anchor_text", ""),
+            "visual_type": beat.get("visual_type", "stock_video"),
+            "search_query": beat.get("search_query", ""),
+            "candidates": [
+                {
+                    "index": idx,
+                    "kind": item.get("kind", "image"),
+                    "provider": item.get("provider", ""),
+                    "title": (item.get("title") or "")[:120],
+                    "tags_or_description": (item.get("keywords") or "")[:180],
+                    "size": f'{item.get("width", 0)}x{item.get("height", 0)}',
+                }
+                for idx, item in enumerate(pool[:3])
+            ],
+        })
+    context = {
+        "topic_title": topic["title"],
+        "category": topic["category"],
+        "real_event": bool(topic.get("discovery", {}).get("real_event")),
+        "event_year": topic.get("discovery", {}).get("event_year", ""),
+        "narration": " ".join(topic["beats"]),
+        "beats": batched,
+    }
+    instruction = (
+        "Select the most visually relevant media candidate for each beat in one pass. "
+        "For each beat, compare the anchor_text and narration context against the candidate titles/tags. "
+        "Pick index 0, 1, or 2 ONLY if that candidate genuinely depicts the subject or action of the beat "
+        "(prefer video for stock_video beats when equally relevant). "
+        "Return -1 if none of the candidates clearly match the beat, if they depict the wrong species/object/era, "
+        "or if they look like unrelated text scans/diagrams. "
+        "Return JSON mapping every supplied beat_id to its choice (-1, 0, 1, or 2).\n" + json.dumps(context)
+    )
+    payload = {
+        "contents": [{"parts": [{"text": instruction}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "selections": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "beat_id": {"type": "INTEGER"},
+                                "choice": {"type": "INTEGER"},
+                            },
+                            "required": ["beat_id", "choice"],
+                        },
+                    }
+                },
+                "required": ["selections"],
+            },
+        },
+    }
+    if requests_sent is not None:
+        requests_sent.append(payload)
+    try:
+        response, _ = rate_limiter.call_gemini(key, payload, model="gemini-3.1-flash-lite", timeout=35)
+        if not response.ok:
+            print(f"Visual relevance gate unavailable (HTTP {response.status_code}); using top ranked matches.",
+                  file=sys.stderr)
+            return {beat_id: 0 for beat_id in candidate_pools}
+        parts = response.json()["candidates"][0]["content"]["parts"]
+        parsed = json.loads("".join(part["text"] for part in parts if not part.get("thought")))
+        choices = {}
+        for entry in parsed.get("selections", []):
+            bid = entry.get("beat_id")
+            choice = entry.get("choice")
+            if bid in candidate_pools and isinstance(choice, int) and -1 <= choice < len(candidate_pools[bid]):
+                choices[bid] = choice
+        return {beat_id: choices.get(beat_id, 0) for beat_id in candidate_pools}
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as error:
+        print(f"Visual relevance gate fallback ({type(error).__name__}); using top ranked matches.", file=sys.stderr)
+        return {beat_id: 0 for beat_id in candidate_pools}
+
+
+def cache_storyboard(topic, *, requests_sent=None):
+    """Resolve missing shots from zero-quota archives first, then cached/deduped Pixabay + batched Gemini gate."""
     topic_id = topic["id"]
     discovery = topic["discovery"]
     specs = discovery.get("beats")
@@ -439,43 +570,77 @@ def cache_storyboard(topic):
             shots[opening_id] = dict(cache_commons(topic_id, supplied["url"], event_year=event_year), supplied=True)
         except (requests.RequestException, OSError, ValueError):
             print("The supplied Commons asset could not be imported.", file=sys.stderr)
-    stock = [name for name in ("pixabay", "pexels") if secret(name.upper() + "_API_KEY")]
+    stock = []
+    if secret("PIXABAY_API_KEY"):
+        stock.append("pixabay")
+    if pexels_enabled() and secret("PEXELS_API_KEY"):
+        stock.append("pexels")
     archives = ["wikimedia"]
     if re.search(r"\b(space|planet|moon|orbit|nasa|astronom\w*|mars|earth|solar|star\w*)\b",
                  topic["category"] + " " + topic["title"], re.I):
         archives.insert(0, "nasa")
+    has_manim = find_spec("manim") is not None
+    query_cache = {}
+
+    def lookup(search_text, providers, required_year, visual_type):
+        key = (normalize_query(search_text), tuple(providers), required_year, visual_type)
+        if key not in query_cache:
+            found = ranked_matches(search_text, providers, strict=True, event_year=required_year)
+            if visual_type == "diagram":
+                found = [match for match in found if match["kind"] == "image"]
+            elif specs and visual_type == "stock_video" and not required_year:
+                found.sort(key=lambda match: match["kind"] != "video")
+            query_cache[key] = found
+        return query_cache[key]
+
+    beats_by_id = {beat["beat_id"]: beat for beat in requests_by_beat}
+    candidate_pools = {}
+    candidate_meta = {}
+    for beat in requests_by_beat:
+        index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
+        if index in shots or not query or visual_type == "callout_card":
+            continue
+        if visual_type == "diagram" and beat.get("diagram") and has_manim:
+            continue
+        archive_search = query if not event_year or event_year in keywords(query) else f"{query} {event_year}"
+        matches = lookup(archive_search, archives, event_year, visual_type)
+        is_stock = False
+        if not matches and stock:
+            matches = lookup(query, stock, "", visual_type)
+            is_stock = bool(matches)
+        if matches:
+            candidate_pools[index] = matches[:3]
+            candidate_meta[index] = is_stock
+
+    selections = select_relevant_candidates(topic, beats_by_id, candidate_pools, requests_sent=requests_sent)
     used = {record["source"] for record in shots.values()}
     used_files = {record["file"] for record in shots.values()}
     for beat in requests_by_beat:
         index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
         if index in shots or not query or visual_type == "callout_card":
             continue
-        groups = ((archives, event_year), (stock, "")) if event_year else (
-            ((stock, ""),) if event else ((archives, ""), (stock, "")) if visual_type == "archival"
-            else ((stock + archives, ""),))
-        for providers, required_year in groups:
-            search = query if not required_year or required_year in keywords(query) else f"{query} {required_year}"
-            matches = ranked_matches(search, providers, strict=True, event_year=required_year)
-            if visual_type == "diagram":
-                matches = [match for match in matches if match["kind"] == "image"]
-            elif specs and visual_type == "stock_video" and not required_year:
-                matches.sort(key=lambda match: match["kind"] != "video")
-            for match in islice((match for match in matches if match["source"] not in used), 6):
+        if visual_type == "diagram" and beat.get("diagram") and has_manim:
+            continue
+        choice = selections.get(index, -1)
+        if index in candidate_pools and choice >= 0:
+            pool = candidate_pools[index]
+            ordered = [pool[choice]] + [item for i, item in enumerate(pool) if i != choice]
+            for match in ordered:
+                if match["source"] in used:
+                    continue
                 try:
                     asset = cache(topic_id, dict(match, automatic=True))
                 except (requests.RequestException, OSError, ValueError):
                     continue
                 if asset["file"] in used_files:
                     continue
-                if event and not required_year:
+                if event and candidate_meta.get(index):
                     asset["context_label"] = "ILLUSTRATIVE STOCK"
                 shots[index] = asset
                 used.add(asset["source"])
                 used_files.add(asset["file"])
                 break
-            if index in shots:
-                break
-        if index not in shots and secret("POLLINATIONS_ZERO_COST_MODEL").strip():
+        if index not in shots and choice != -1 and secret("POLLINATIONS_ZERO_COST_MODEL").strip():
             try:
                 asset = cache(topic_id, dict(illustration_request(query), automatic=True))
                 if asset["file"] not in used_files:
@@ -520,9 +685,13 @@ def main():
         if args.auto:
             if args.provider == "pollinations":
                 parser.error("Use --pollinations-fallback with --auto, or request --use generate.")
+            if args.provider == "pexels" and not pexels_enabled():
+                raise ValueError("Pexels is disabled (ENABLE_PEXELS=false).")
             providers = [args.provider] if args.provider else [
-                name for name in ("pexels", "pixabay", "nasa", "wikimedia")
-                if name in {"nasa", "wikimedia"} or secret(name.upper() + "_API_KEY")
+                name for name in ("nasa", "wikimedia", "pixabay", "pexels")
+                if name in {"nasa", "wikimedia"}
+                or (name == "pixabay" and secret("PIXABAY_API_KEY"))
+                or (name == "pexels" and pexels_enabled() and secret("PEXELS_API_KEY"))
             ]
             selected_asset = cache_best(args.topic, args.query, providers, args.pollinations_fallback)
         elif provider == "pollinations":
@@ -530,6 +699,8 @@ def main():
                 parser.error("Use --use generate to request one configured zero-cost AI illustration.")
             selected_asset = cache(args.topic, illustration_request(args.query))
         else:
+            if provider == "pexels" and not pexels_enabled():
+                raise ValueError("Pexels is disabled (ENABLE_PEXELS=false).")
             matches = list(candidates(args.query, provider))
             if not args.use:
                 for match in matches:

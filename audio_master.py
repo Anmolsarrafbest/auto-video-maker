@@ -153,9 +153,10 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues, *, visual_time
         cmd += ["-stream_loop", "-1", "-i", str(source)]
         graph[0] = graph[0].replace("[voice]", ",asplit=2[voice][key]")
         space = "aecho=0.8:0.88:55:0.22," if music == "SoundFont MIDI" else ""
+        fade_in, fade_out = (.04, .04) if topic.get("loop") else (.25, .6)
         graph += [
             f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:{seconds},"
-            f"highpass=f=65,{space}volume=0.47,afade=t=in:d=0.25,afade=t=out:st={max(0, seconds - .6)}:d=0.6[bed]",
+            f"highpass=f=65,{space}volume=0.47,afade=t=in:d={fade_in},afade=t=out:st={max(0, seconds - fade_out)}:d={fade_out}[bed]",
             "[bed][key]sidechaincompress=threshold=0.025:ratio=5:attack=25:release=330[duck]",
         ]
         mix.append("[duck]")
@@ -165,8 +166,9 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues, *, visual_time
     reveal, outro = cues
     accents = transition_cues(visual_timeline, outro)
     opening_pop = visual_timeline and visual_timeline[0].get("callout_stat")
-    cue_plan = [(0, "pop", .16, -27) if opening_pop else (0, "whoosh", .30, -21),
-                (outro, "chime", .65, -16)]
+    cue_plan = [(0, "pop", .16, -27) if opening_pop else (0, "whoosh", .30, -21)]
+    if not topic.get("loop"):
+        cue_plan.append((outro, "chime", .65, -16))
     if not any(abs(time - reveal) < .45 for time, *_ in accents):
         cue_plan.append((reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65, -19))
     peaks = {}

@@ -232,6 +232,11 @@ def flow_prompt(topic, timings, seconds, plan, clip_used, *, visual_timeline=())
         f'{reveal:.2f}–{end_shot:.2f}s | Explanation. {explanation}.\n'
         f'{end_shot:.2f}–{seconds:.2f}s | Payoff. {payoff}'
     )
+    ending_note = (
+        'End cleanly for a seamless loop back to the opening shot without an outro card. '
+        if topic.get("loop") else
+        'Add a readable “Follow and subscribe” overlay in the final two seconds during editing. '
+    )
     return (
         f'{seconds}-second vertical 9:16 {layout} episode: {topic["title"]}\n'
         f'Factual reference: {topic["source"]}\n{asset}\n'
@@ -242,6 +247,6 @@ def flow_prompt(topic, timings, seconds, plan, clip_used, *, visual_timeline=())
         'Use hard cuts or motivated reframing. Keep motion slow enough to read on a phone. '
         'Avoid invented numbers, logos, fake archive material, and generated on-screen text. '
         'Use an instrumental arrangement under the voice and let it rise in the gaps. '
-        'Add a readable “Follow and subscribe” overlay in the final two seconds during editing. '
+        + ending_note +
         'If a single generation is too short, render the shots separately and join them in this order.\n'
     )

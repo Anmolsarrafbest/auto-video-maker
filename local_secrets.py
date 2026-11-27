@@ -28,6 +28,17 @@ def assignment(name):
     return re.compile(r"^\s*(?:export\s+)?" + re.escape(name) + r"\s*=\s*(.*)$")
 
 
+def flag(name, default=False):
+    raw = secret(name).strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean flag (true or false).")
+
+
 def store_secret(name, value):
     lines = ENV_FILE.read_text(encoding="utf-8-sig").splitlines() if ENV_FILE.is_file() else []
     pattern = assignment(name)
