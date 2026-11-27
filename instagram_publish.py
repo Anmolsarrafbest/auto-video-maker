@@ -1,6 +1,7 @@
 """Prepare approved Reels and publish them locally through Meta's official API."""
 
 import argparse
+from datetime import datetime, timezone
 from getpass import getpass
 import re
 import sys
@@ -120,7 +121,18 @@ def publish(session, config, job, record, day):
     result = request(session, "POST", f"{GRAPH}/{config['account_id']}/media_publish",
                      data={"creation_id": container})
     record["media_id"] = result["id"]
+    instagram_url = ""
+    try:
+        permalink = request(session, "GET", f"{GRAPH}/{result['id']}", params={"fields": "permalink"}).get("permalink", "")
+        if isinstance(permalink, str) and permalink.startswith("https://"):
+            instagram_url = permalink
+            record["permalink"] = permalink
+    except (ValueError, shorts.requests.RequestException):
+        pass
+    if not instagram_url and config.get("username"):
+        instagram_url = f"https://www.instagram.com/{config['username']}/"
     shorts.save_json(path, record)
+    shorts.record_published_history(job, instagram_url=instagram_url)
     print(f"Instagram Reel published. Media ID {result['id']}.")
 
 
@@ -208,6 +220,62 @@ def publish_reels(jobs, day):
             raise ValueError("; ".join(failures))
 
 
+def _parse_expiry_date(raw):
+    text = raw.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def check_token_expiry(token=None, *, warn_days=7, now=None):
+    """Return a warning string if the Instagram token expires within warn_days, else None."""
+    current = now or datetime.now(timezone.utc)
+    expires_at = None
+    configured = secret("INSTAGRAM_TOKEN_EXPIRES_AT").strip()
+    if configured:
+        try:
+            expires_at = _parse_expiry_date(configured)
+        except ValueError:
+            return f"INSTAGRAM_TOKEN_EXPIRES_AT has an invalid date format: {configured!r}."
+    else:
+        resolved_token = (token if token is not None else secret("INSTAGRAM_PAGE_ACCESS_TOKEN")).strip()
+        if not resolved_token and CONFIG.is_file():
+            resolved_token = str(shorts.read_json(CONFIG).get("token", "")).strip()
+        if not resolved_token:
+            return None
+        try:
+            response = shorts.requests.get(
+                f"{GRAPH}/debug_token",
+                params={"input_token": resolved_token, "access_token": resolved_token},
+                timeout=15,
+            )
+            if response.ok:
+                data = response.json().get("data") or {}
+                for field in ("expires_at", "data_access_expires_at"):
+                    timestamp = data.get(field)
+                    if isinstance(timestamp, (int, float)) and timestamp > 0:
+                        expires_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                        break
+        except (ValueError, OSError, shorts.requests.RequestException):
+            return None
+    if expires_at is None:
+        return None
+    seconds_left = (expires_at - current).total_seconds()
+    expiry_label = expires_at.date().isoformat()
+    if seconds_left <= 0:
+        return f"Instagram token expired on {expiry_label}. Refresh INSTAGRAM_PAGE_ACCESS_TOKEN."
+    days_left = max(0, int(seconds_left // 86400))
+    if seconds_left <= warn_days * 86400:
+        return (
+            f"Instagram token expires in {days_left} day(s) ({expiry_label}). "
+            "Refresh INSTAGRAM_PAGE_ACCESS_TOKEN."
+        )
+    return None
+
+
 def main():
     shorts.configure_console()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -218,7 +286,16 @@ def main():
     for command in ("preview", "approve"):
         sub.add_parser(command).add_argument("job")
     sub.add_parser("publish-next")
+    expiry = sub.add_parser("check-token", help="Warn if the Instagram token is within 7 days of expiry")
+    expiry.add_argument("--warn-days", type=int, default=7)
     args = parser.parse_args()
+    if args.command == "check-token":
+        warning = check_token_expiry(warn_days=args.warn_days)
+        if warning:
+            print(f"WARNING: {warning}", file=sys.stderr)
+        else:
+            print("Instagram token expiry check OK.")
+        return
     shorts.STATE.mkdir(exist_ok=True)
     try:
         with shorts.FileLock(shorts.STATE / "worker.lock", timeout=0), shorts.requests.Session() as session:

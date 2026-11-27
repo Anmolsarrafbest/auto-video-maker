@@ -73,6 +73,31 @@ def require(response, allowed, action):
         raise ValueError(f"YouTube could not {action} (HTTP {response.status_code}). {reason}".strip())
 
 
+def build_upload_body(meta, visibility, *, publish_at=None, now=None, check_future=True):
+    """Build the YouTube Data API videos.insert snippet and status payload."""
+    content = {
+        "snippet": {"title": meta["title"], "description": meta["description"], "categoryId": "28"},
+        "status": {
+            "privacyStatus": visibility,
+            "selfDeclaredMadeForKids": bool(meta.get("made_for_kids", False)),
+            "containsSyntheticMedia": bool(meta.get("synthetic_media", False)),
+        },
+    }
+    if publish_at is not None:
+        if visibility != "private" or publish_at.utcoffset() is None:
+            raise ValueError("Scheduled uploads require private visibility and a time zone.")
+        current = now or datetime.now(timezone.utc)
+        if check_future and publish_at <= current:
+            raise ValueError("Choose a future public release time.")
+        content["status"]["publishAt"] = publish_at.isoformat()
+    if meta.get("tags"):
+        content["snippet"]["tags"] = meta["tags"]
+    if meta.get("language"):
+        content["snippet"]["defaultLanguage"] = meta["language"]
+        content["snippet"]["defaultAudioLanguage"] = meta["language"]
+    return content
+
+
 def upload(job, token_path, visibility, execution_date, *, publish_at=None):
     path = job / "upload.json"
     record = read_json(path) if path.exists() else {}
@@ -84,22 +109,7 @@ def upload(job, token_path, visibility, execution_date, *, publish_at=None):
     media = (job / "short.mp4").read_bytes()
     digest = hashlib.sha256(media).hexdigest()
     meta = read_json(job / "metadata.json")
-    content = {
-        "snippet": {"title": meta["title"], "description": meta["description"], "categoryId": "28"},
-        "status": {"privacyStatus": visibility, "selfDeclaredMadeForKids": meta["made_for_kids"],
-                   "containsSyntheticMedia": meta["synthetic_media"]},
-    }
-    if publish_at is not None:
-        if visibility != "private" or publish_at.utcoffset() is None:
-            raise ValueError("Scheduled uploads require private visibility and a time zone.")
-        if not record and publish_at <= datetime.now(timezone.utc):
-            raise ValueError("Choose a future public release time.")
-        content["status"]["publishAt"] = publish_at.isoformat()
-    if meta.get("tags"):
-        content["snippet"]["tags"] = meta["tags"]
-    if meta.get("language"):
-        content["snippet"]["defaultLanguage"] = meta["language"]
-        content["snippet"]["defaultAudioLanguage"] = meta["language"]
+    content = build_upload_body(meta, visibility, publish_at=publish_at, check_future=not record)
     expected_channel = token["channel"]["id"]
     if record and (record["sha256"], record["channel_id"], record["visibility"], record["content"]) != (
         digest, expected_channel, visibility, content

@@ -67,6 +67,32 @@ def inspect_draft(video, metadata):
     return {"duration_seconds": actual, "integrated_lufs": integrated, "warnings": warnings}
 
 
+def qa_gate(job):
+    """Evaluate hard QA failures that must block unattended publishing."""
+    video = job / "short.mp4"
+    meta_path = job / "metadata.json"
+    if not video.is_file() or video.stat().st_size == 0:
+        return {"passed": False, "errors": ["Rendered video file is missing or empty."], "warnings": []}
+    if not meta_path.is_file():
+        return {"passed": False, "errors": ["Draft metadata.json is missing."], "warnings": []}
+    try:
+        meta = shorts.read_json(meta_path)
+    except (OSError, ValueError):
+        return {"passed": False, "errors": ["Draft metadata.json is unreadable."], "warnings": []}
+    qa = meta.get("qa") if isinstance(meta.get("qa"), dict) else inspect_draft(video, meta)
+    warnings = list(qa.get("warnings") or [])
+    errors = []
+    duration = qa.get("duration_seconds")
+    if duration is None or duration <= 0:
+        errors.append("FFmpeg did not measure a valid video duration.")
+    if qa.get("integrated_lufs") is None:
+        errors.append("FFmpeg did not measure integrated audio loudness.")
+    for warning in warnings:
+        if warning.startswith("Visual beat "):
+            errors.append(warning)
+    return {"passed": not errors, "errors": errors, "warnings": warnings}
+
+
 def approval_matches(job):
     review = job / "review.json"
     if not review.is_file():

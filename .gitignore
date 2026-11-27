@@ -5,7 +5,8 @@ __pycache__/
 .env.*
 !.env.example
 secrets/
-state/
+state/*
+!state/published_history.json
 output/
 voices/
 assets-cache/

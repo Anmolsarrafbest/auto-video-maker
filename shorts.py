@@ -10,6 +10,7 @@ import re
 import random
 import sys
 import tempfile
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from youtube import has_token, read_json, read_token, save_json, sign_in, upload
 
 OUTPUT = ROOT / "output"
 STATE = ROOT / "state"
+HISTORY_FILE = STATE / "published_history.json"
 VOICE_DIR = ROOT / "voices"
 TOKEN = ROOT / "secrets" / "youtube-token.json"
 PAUSED_LANGUAGES = {"hi"}
@@ -772,6 +774,91 @@ def today(timezone):
     return datetime.now(ZoneInfo(timezone)).date().isoformat()
 
 
+def load_published_history(path=HISTORY_FILE):
+    """Read tracked published-history records safely."""
+    if not path.is_file():
+        return []
+    raw = path.read_text(encoding="utf-8-sig").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def published_history_titles(path=HISTORY_FILE):
+    """Return past published titles in chronological order."""
+    return [str(entry["title"]).strip() for entry in load_published_history(path)
+            if isinstance(entry.get("title"), str) and entry["title"].strip()]
+
+
+def discovery_avoid_titles(topics, *, history_path=HISTORY_FILE):
+    """Build deduplicated avoid-repeating titles from local jobs, tracked history, and topics.json."""
+    seen = set()
+    ordered = []
+    local_titles = [read_json(job / "metadata.json")["title"] for job in reversed(completed_jobs())]
+    history_titles = list(reversed(published_history_titles(history_path)))
+    library_titles = [topic["title"] for topic in topics]
+    for title in (*local_titles, *history_titles, *library_titles):
+        key = cleaned(title)
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(title)
+    return ordered
+
+
+def record_published_history(job, *, youtube_url="", instagram_url="", path=HISTORY_FILE):
+    """Append or update one entry in state/published_history.json for a published job."""
+    meta = read_json(job / "metadata.json")
+    topic_id = str(meta.get("topic_id") or job.name)
+    title = str(meta.get("title") or "").strip()
+    qa_warnings = list((meta.get("qa") or {}).get("warnings") or [])
+    run_date = today("Asia/Kolkata")
+    entries = load_published_history(path)
+    target = next((entry for entry in reversed(entries)
+                   if entry.get("topic_id") == topic_id and entry.get("date") == run_date), None)
+    if target is None:
+        target = {
+            "date": run_date,
+            "title": title,
+            "topic_id": topic_id,
+            "youtube_url": "",
+            "instagram_url": "",
+            "qa_warnings": qa_warnings,
+        }
+        entries.append(target)
+    else:
+        if title:
+            target["title"] = title
+        target["qa_warnings"] = qa_warnings
+    if youtube_url:
+        target["youtube_url"] = youtube_url
+    if instagram_url:
+        target["instagram_url"] = instagram_url
+    save_json(path, entries)
+    return target
+
+
+def filter_qa_jobs(job_paths):
+    """Split jobs into QA-passing jobs and skipped (job, errors) pairs."""
+    from queue_publish import qa_gate
+
+    passed = []
+    skipped = []
+    for job in job_paths:
+        gate = qa_gate(job)
+        if gate["passed"]:
+            passed.append(job)
+        else:
+            print(f"QA gate skipped {job.name}: {'; '.join(gate['errors'])}", file=sys.stderr)
+            skipped.append((job, gate["errors"]))
+    return passed, skipped
+
+
 def publish(job, visibility, date, limit, allow_reviewed=False):
     meta = read_json(job / "metadata.json")
     upload_path = job / "upload.json"
@@ -808,7 +895,9 @@ def publish(job, visibility, date, limit, allow_reviewed=False):
             meta.update(tags=defaults["tags"], language=defaults["language"])
             save_json(job / "metadata.json", meta)
     video_id = upload(job, TOKEN, visibility, date)
-    print(f"Uploaded as {visibility}: https://youtu.be/{video_id}")
+    youtube_url = f"https://youtu.be/{video_id}"
+    record_published_history(job, youtube_url=youtube_url)
+    print(f"Uploaded as {visibility}: {youtube_url}")
 
 
 def cli():
@@ -860,7 +949,121 @@ def cli():
     both = sub.add_parser("publish-both", help="Publish existing drafts or resume a batch upload")
     both.add_argument("jobs", nargs="+", help="Exact output job folder names")
     both.add_argument("--platform", choices=("both", "youtube", "instagram"), default="both")
+    both.add_argument("--qa-gate", action="store_true", help="Skip drafts with hard QA failures instead of aborting")
+    batch_cmd = sub.add_parser("discover-batch", help="Generate and optionally publish discovery Shorts sequentially")
+    batch_cmd.add_argument("--count", type=int, choices=range(1, 12), default=1)
+    batch_cmd.add_argument("--seconds", type=int, choices=sorted(DISCOVERY_DURATIONS))
+    batch_cmd.add_argument("--region", default="IN")
+    batch_cmd.add_argument("--offline", action="store_true")
+    batch_cmd.add_argument("--no-auto-visuals", action="store_true")
+    batch_cmd.add_argument("--hq-script", action="store_true")
+    batch_cmd.add_argument("--loop", action="store_true")
+    batch_cmd.add_argument("--platform", choices=("draft", "both", "youtube", "instagram"), default="both")
+    batch_cmd.add_argument("--delay-seconds", type=int, default=120)
+    batch_cmd.add_argument("--qa-gate", action="store_true")
+    batch_cmd.add_argument("--summary-file", type=Path)
     return parser.parse_args(sys.argv[1:] or ["--help"])
+
+
+def run_discover_batch(args, topics, current_trends):
+    """Run sequential discovery, QA gating, publishing, and inter-video pacing."""
+    import instagram_publish as instagram
+    from queue_publish import qa_gate
+
+    if args.count > 1 and args.seconds is not None:
+        raise ValueError("Omit --seconds for a batch so each draft can have a different length.")
+    durations = random.sample(range(15, 26), args.count) if args.count > 1 else [args.seconds or 15]
+    titles = discovery_avoid_titles(topics)
+    styles = list(DISCOVERY_TREATMENTS)
+    random.shuffle(styles)
+    batch = new_output_batch()
+    subject_areas = ("history of an invention or documented historical event", "animal behavior",
+                     "Earth science or weather", "art or design history", "everyday physics or engineering")
+    request_log = []
+    items = []
+    completed_renders = 0
+    published_count = 0
+
+    def write_summary():
+        if not args.summary_file:
+            return
+        save_json(args.summary_file, {
+            "attempted": len(durations),
+            "completed_renders": completed_renders,
+            "published": published_count,
+            "platform": args.platform,
+            "items": items,
+        })
+
+    for index, seconds in enumerate(durations, 1):
+        print(f"Discovery draft {index}/{len(durations)} ({seconds}s)", flush=True)
+        attempts = []
+        entry = {
+            "index": index,
+            "topic_id": "",
+            "title": "",
+            "youtube_url": "",
+            "instagram_url": "",
+            "qa_warnings": [],
+            "qa_skipped": False,
+            "error": "",
+        }
+        try:
+            topic = discover_topic(
+                seconds, current_trends(), titles,
+                subject_area=subject_areas[(index - 1) % len(subject_areas)] if args.count > 1 else None,
+                requests_sent=attempts, hq_script=args.hq_script, loop=args.loop,
+            )
+            style = styles[(index - 1) % len(styles)]
+            topic = discovery_treatment(topic, style)
+            if not (args.offline or args.no_auto_visuals):
+                visuals.cache_storyboard(topic, requests_sent=attempts)
+            job = batch / f'{topic["id"]}-{uuid.uuid4().hex[:8]}'
+            render_job(topic, "Gemini topic discovery", seconds, job, loop=args.loop)
+            completed_renders += 1
+            titles.insert(0, topic["title"])
+            entry["topic_id"] = topic["id"]
+            entry["title"] = topic["title"]
+            gate = qa_gate(job)
+            entry["qa_warnings"] = gate["warnings"]
+            if args.platform != "draft":
+                if args.qa_gate and not gate["passed"]:
+                    entry["qa_skipped"] = True
+                    entry["error"] = "; ".join(gate["errors"])
+                    print(f"QA gate skipped {job.name}: {entry['error']}", file=sys.stderr)
+                else:
+                    try:
+                        instagram.publish_batch([job], args.platform)
+                    except (ValueError, RefreshError, requests.RequestException) as error:
+                        entry["error"] = str(error) if isinstance(error, ValueError) else type(error).__name__
+                    upload_path = job / "upload.json"
+                    if upload_path.is_file():
+                        vid = read_json(upload_path).get("video_id")
+                        if vid:
+                            entry["youtube_url"] = f"https://youtu.be/{vid}"
+                    ig_path = job / "instagram.json"
+                    if ig_path.is_file():
+                        ig_rec = read_json(ig_path)
+                        if ig_rec.get("media_id"):
+                            entry["instagram_url"] = ig_rec.get("permalink") or f"instagram:media:{ig_rec['media_id']}"
+                    if entry["youtube_url"] or entry["instagram_url"]:
+                        published_count += 1
+        except (ValueError, KeyError, OSError, requests.RequestException) as error:
+            entry["error"] = str(error) if isinstance(error, ValueError) else type(error).__name__
+            print(f"Discovery slot {index} failed: {entry['error']}", file=sys.stderr)
+        finally:
+            request_log.append({"draft": index, "requests": attempts})
+            save_json(batch / "gemini-requests.json", request_log)
+            items.append(entry)
+            write_summary()
+        if index < len(durations) and args.delay_seconds > 0:
+            print(f"Sleeping {args.delay_seconds}s before next discovery slot.", flush=True)
+            time.sleep(args.delay_seconds)
+
+    if args.platform != "draft" and published_count == 0:
+        raise ValueError("No discovery Shorts were published in this batch.")
+    if args.platform == "draft" and completed_renders == 0:
+        raise ValueError("No discovery Shorts were rendered in this batch.")
 
 
 def run(args):
@@ -868,7 +1071,13 @@ def run(args):
         import instagram_publish as instagram
 
         available = completed_jobs()
-        instagram.publish_batch([find_job(name, available) for name in dict.fromkeys(args.jobs)], args.platform)
+        selected = [find_job(name, available) for name in dict.fromkeys(args.jobs)]
+        if args.qa_gate:
+            selected, _ = filter_qa_jobs(selected)
+        if not selected:
+            print("No drafts passed the QA gate; nothing to publish.", file=sys.stderr)
+            return
+        instagram.publish_batch(selected, args.platform)
         return
     if args.command == "setup-kokoro":
         from local_voices import setup_kokoro
@@ -942,6 +1151,10 @@ def run(args):
             trends = {} if args.offline else {region: fetch_trends(region) for region in regions}
         return trends
 
+    if args.command == "discover-batch":
+        run_discover_batch(args, topics, current_trends)
+        return
+
     if args.command == "generate":
         if args.count > 1 and not args.discover:
             raise ValueError("--count requires --discover.")
@@ -955,8 +1168,7 @@ def run(args):
             if args.count > 1 and args.seconds is not None:
                 raise ValueError("Omit --seconds for a batch so each draft can have a different length.")
             durations = random.sample(range(15, 26), args.count) if args.count > 1 else [args.seconds or 15]
-            titles = [read_json(job / "metadata.json")["title"] for job in reversed(completed_jobs())]
-            titles += [topic["title"] for topic in topics]
+            titles = discovery_avoid_titles(topics)
             jobs = []
             styles = list(DISCOVERY_TREATMENTS)
             random.shuffle(styles)
