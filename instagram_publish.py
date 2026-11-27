@@ -149,7 +149,7 @@ def resolve_config(session, token):
 
 
 def publish_reels(jobs, day):
-    token = secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or (shorts.read_json(CONFIG).get("token") if CONFIG.is_file() else "")
+    token = (secret("INSTAGRAM_PAGE_ACCESS_TOKEN") or (shorts.read_json(CONFIG).get("token") if CONFIG.is_file() else "")).strip()
     if not token:
         raise ValueError("The Instagram Page token is missing.")
     for job in jobs:

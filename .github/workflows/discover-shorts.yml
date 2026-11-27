@@ -32,7 +32,7 @@ on:
       publish_target:
         description: Save draft only or publish after rendering
         required: true
-        default: draft
+        default: both
         type: choice
         options:
           - draft

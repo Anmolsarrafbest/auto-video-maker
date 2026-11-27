@@ -102,7 +102,7 @@ def publish(job, topic, destinations):
     day = shorts.today("Asia/Kolkata")
     with shorts.requests.Session() as session:
         if instagram_enabled:
-            access_token = shorts.secret("INSTAGRAM_PAGE_ACCESS_TOKEN")
+            access_token = shorts.secret("INSTAGRAM_PAGE_ACCESS_TOKEN").strip()
             if not access_token:
                 raise ValueError("INSTAGRAM_PAGE_ACCESS_TOKEN is missing.")
             session.headers["Authorization"] = f"Bearer {access_token}"
