@@ -496,7 +496,12 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
     year = year if archival and re.fullmatch(r"[12]\d{3}", year) else ""
     media = {"media": {"url": event_media}} if year and isinstance(event_media, str) and (
         event_media.startswith("https://commons.wikimedia.org/wiki/File:")) else {}
-    icon = visuals.shot_search_fields({"icon_query": model_output.get("icon_query")}, result["title"], [])["icon_query"]
+    raw_icon = str(model_output.get("icon_query") or "").strip()
+    try:
+        icon = visuals.shot_search_fields({"icon_query": raw_icon or None}, result["title"], [])["icon_query"]
+    except ValueError:
+        icon_terms = visuals.keywords(raw_icon)[:2] or visuals.keywords(result["title"])[:2]
+        icon = " ".join(icon_terms)
     if EXCLUDED_TOPICS.search(" ".join([icon, *visual_beat_text(visual_beats)])):
         raise ValueError("Gemini returned visuals outside the editorial scope.")
     return {"id": f"discovered-{slug[:64]}", "title": result["title"], "category": result["category"],

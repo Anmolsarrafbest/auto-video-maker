@@ -376,6 +376,8 @@ def keywords(text):
 def shot_search_fields(value, title, shots):
     queries = value.get("shot_queries")
     icon = value.get("icon_query")
+    if isinstance(icon, str):
+        icon = " ".join(icon.split()) or None
 
     def valid_phrase(phrase, low, high):
         return (isinstance(phrase, str) and len(phrase) <= 70
