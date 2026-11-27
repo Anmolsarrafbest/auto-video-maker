@@ -1,5 +1,6 @@
 """Draw original science illustrations and encode narrated portrait video."""
 
+import io
 import math
 from bisect import bisect_right
 from functools import lru_cache
@@ -13,12 +14,12 @@ import wave
 
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from hindi_captions import ass_filter, topic_badge
+from hindi_captions import ass_filter, build_word_timeline, topic_badge
 from audio_master import master
 from local_secrets import secret
 from local_voices import windows_pcm
 from production import HINDI, INDIAN_ENGLISH, SCORES, treatment
-from storyboard import CLIPS, episode
+from storyboard import CLIPS, episode, resolve_visual_timeline
 import footage
 
 WIDTH, HEIGHT = 720, 1280
@@ -27,6 +28,7 @@ FPS = int(secret("SHORTS_FPS") or "30")
 if FPS not in (30, 60):
     raise ValueError("SHORTS_FPS must be 30 or 60.")
 END_CARD = "Follow and subscribe"
+OUTRO_SECONDS = 2
 ANSWER_PAUSE = 1.5
 PALETTES = {
     "observatory": ((9, 14, 29), (10, 12, 21), "#405273", "#0D1527", 30),
@@ -58,9 +60,8 @@ def spoken_plan(topic, beats):
         style in {"quiz", "myth"} and random.Random(topic.get("id", "") + ":hook").random() < .4
     )
     episode_plan = topic.get("episode_plan")
-    opening = episode_plan["opening"] if episode_plan else topic.get("opening")
-    plan = [] if natural and not opening else [("hook", beats[0], .14)]
-    question = opening == "question" if opening else style == "quiz" and not natural
+    plan = [] if natural and not episode_plan else [("hook", beats[0], .14)]
+    question = episode_plan["opening"] == "question" if episode_plan else style == "quiz" and not natural
     if question:
         plan.append(("pause", think_line(topic), .18))
     parts = re.split(r"(?<=[a-z0-9]\.)(?=\s+[A-Z])\s+|(?<=।)\s+", beats[1])
@@ -68,7 +69,7 @@ def spoken_plan(topic, beats):
     if len(parts) > 1 and len(parts[0].split()) < 4:
         parts[:2] = [" ".join(parts[:2])]
     reveal_gap = ANSWER_PAUSE if question else .25
-    return plan + [("answer", text, reveal_gap if i == 0 else .17) for i, text in enumerate(parts)]
+    return plan + [("answer", text, reveal_gap if i == 0 else .1) for i, text in enumerate(parts)]
 
 
 def font(size, bold=False, serif=False):
@@ -86,7 +87,7 @@ def font(size, bold=False, serif=False):
 def motion_cues(topic, beats, timings, seconds):
     reveal = next(start for (role, _, _), (start, _) in zip(spoken_plan(topic, beats), timings)
                   if role == "answer")
-    return (reveal, seconds - 2)
+    return (reveal, seconds - OUTRO_SECONDS)
 
 
 def wrap(text, face, width):
@@ -130,6 +131,14 @@ def _rounded_mask(size, radius=32):
     return mask
 
 
+@lru_cache(maxsize=8)
+def _frame_shadow(size):
+    inset = 30
+    shadow = Image.new("L", (size[0] + 2 * inset, size[1] + 2 * inset))
+    shadow.paste(_rounded_mask(size).point(lambda value: value * .6), (inset, inset))
+    return shadow.filter(ImageFilter.GaussianBlur(10)), inset
+
+
 class SupersampledShapes:
     """Scale the existing illustration coordinates onto an antialiased art plane."""
 
@@ -159,13 +168,13 @@ class SupersampledShapes:
         self.draw.line(self.points(points), fill, width * self.scale, joint="curve")
 
 
-def camera_shot(image, size, time, duration, zoom=.12):
+def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0):
     motion = ease_cubic(time / max(.1, duration))
     aspect = size[0] / size[1]
-    width = min(image.width, image.height * aspect) / (1 + zoom * motion)
+    width = min(image.width, image.height * aspect) / (1 + .16 * bool(reframe) + zoom * motion)
     height = width / aspect
-    x = (image.width - width) * (.35 + .3 * motion)
-    y = (image.height - height) * .42
+    x = (image.width - width) * (.65 - .3 * motion if reframe % 2 else .35 + .3 * motion)
+    y = (image.height - height) * (.58 if reframe % 2 else .42)
     return image.transform(size, Image.Transform.EXTENT, (x, y, x + width, y + height),
                            Image.Resampling.BICUBIC)
 
@@ -204,6 +213,9 @@ class NativeOverlay:
     def rectangle(self, coords, **kwargs):
         self.draw.rectangle(native_coordinates(coords), **kwargs)
 
+    def polygon(self, points, *, fill):
+        self.draw.polygon(native_coordinates(points), fill=fill)
+
     def rounded_rectangle(self, coords, *, radius, width=1, **kwargs):
         scale = OUTPUT_SIZE[0] / WIDTH
         self.draw.rounded_rectangle(native_coordinates(coords), radius=round(radius * scale),
@@ -230,7 +242,13 @@ def place_visual(shot, position, time, *, portrait=False):
     img = backdrop.resize(OUTPUT_SIZE, Image.Resampling.BILINEAR)
     if punch:
         shot = camera_shot(shot, shot.size, 1, 1, zoom=punch)
-    img.paste(shot, position, _rounded_mask(shot.size))
+    framed_size = (round(shot.width * .92), round(shot.height * .92))
+    x = position[0] + (shot.width - framed_size[0]) // 2
+    y = position[1] + (shot.height - framed_size[1]) // 2
+    shot = shot.resize(framed_size, Image.Resampling.LANCZOS)
+    shadow, inset = _frame_shadow(framed_size)
+    img.paste((0, 0, 0), (x - inset, y - inset + 10, x - inset + shadow.width, y - inset + 10 + shadow.height), shadow)
+    img.paste(shot, (x, y), _rounded_mask(framed_size))
     return img
 
 
@@ -257,14 +275,7 @@ def lunar_sphere(phase):
 def illustration(draw, scene, accent, time, beat):
     x, y = 348, 542
     muted = "#33496C"
-    if scene == "discovery":
-        reach = 90 + 135 * ease_cubic((time % 4) / 3)
-        for offset in (-2, -1, 0, 1, 2):
-            row = y + offset * 29
-            draw.line((x - reach, row, x + reach, row), fill=muted, width=2)
-        circle(draw, x, y, 96, "#152C43", accent, 3)
-        circle(draw, x, y, 74 + 8 * math.sin(time * 2), outline=accent, width=2)
-    elif scene == "orbit":
+    if scene == "orbit":
         draw.ellipse((121, y - 105, 575, y + 105), outline=muted, width=3)
         circle(draw, x, y, 56, "#FFB65C")
         circle(draw, x - 12, y - 14, 24, "#FFD98C")
@@ -418,7 +429,51 @@ def illustration(draw, scene, accent, time, beat):
                       fill=color, width=3)
 
 
-def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(), visual_label=None):
+def discovery_canvas(style, base, accent, time, label, phase, icon=None):
+    img = Image.new("RGB", OUTPUT_SIZE, base)
+    draw = NativeOverlay(img)
+    ink = tuple(round(a * .22 + b * .78) for a, b in zip(accent, base))
+    enter = ease_cubic(phase / .55)
+    y = 530 + round(30 * (1 - enter))
+    if style == "field-notes":
+        for row in range(230, 810, 34):
+            draw.line((90, row, 630, row), fill=ink, width=1)
+        draw.line((95, 210, 95, 806), fill=accent, width=3)
+        draw.rectangle((116, y - 94, 624, y + 98), fill=base)
+    elif style == "waveform":
+        for band in range(5):
+            points = [(x, 345 + band * 90 + math.sin(x / 105 + time * 1.4 + band) * 32)
+                      for x in range(0, 721, 12)]
+            draw.line(points, fill=ink, width=3)
+        draw.rectangle((70, y - 84, 650, y + 84), fill=base)
+    elif style == "cut-paper":
+        offset = round(18 * math.sin(time * .9))
+        draw.polygon(((0, 290), (720, 220 + offset), (720, 413), (0, 500)), fill=ink)
+        draw.polygon(((0, 633), (720, 545), (720, 740 + offset), (0, 810)), fill=ink)
+        draw.rectangle((58, y - 98, 662, y + 98), fill=base)
+    elif style == "spotlight":
+        for radius in range(304, 110, -22):
+            level = (304 - radius) / 194
+            fill = tuple(round(a * level + b * (1 - level)) for a, b in zip(ink, base))
+            draw.ellipse((360 - radius, y - radius, 360 + radius, y + radius), outline=fill, width=18)
+        draw.rectangle((90, y - 82, 630, y + 82), fill=base)
+    else:
+        for column in range(70, 651, 48):
+            for row in range(225, 807, 48):
+                size = 2 + 2 * (1 + math.sin(time * 2 - column / 90 - row / 120))
+                draw.ellipse((column - size, row - size, column + size, row + size), outline=ink, width=3)
+        draw.rounded_rectangle((64, y - 105, 656, y + 105), radius=24, fill=base, outline=ink, width=3)
+    face = native_font(round(54 + 8 * math.sin(math.pi * enter)), True)
+    if icon is not None:
+        x, top = native_coordinates((360, 225 + round(22 * (1 - enter))))
+        img.paste(accent, (x - icon.width // 2, top, x - icon.width // 2 + icon.width, top + icon.height), icon)
+    draw.multiline_text((360, y), wrap(label, face, 720), font=face, anchor="mm",
+                        align="center", fill=accent)
+    return img
+
+
+def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(),
+           *, visual_timeline=(), storyboard=None, load_visual=None, load_diagram=None, icon=None, credit_icon=None):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
     base, _, border, caption_fill, radius = PALETTES[theme]
@@ -443,10 +498,78 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
                    "The colors exit at different angles")
     motion = topic.get("episode_plan", {}).get("motion", "underline")
     archive_duration = seconds * topic.get("archive_fraction", .73)
+    contextual_clip = bool(clip and CLIPS.get(topic["id"], {}).get("start_on_last_line"))
+    clip_start = timings[-1][0] if contextual_clip else 0
     coordinate_scale = OUTPUT_SIZE[0] / WIDTH
+    discovery_style = topic.get("discovery_style") if visual_timeline else None
+    storyboard = storyboard or {}
+    shot_starts = [segment["start_time"] for segment in visual_timeline]
+    card_styles = ("field-notes", "waveform", "cut-paper", "spotlight", "grid")
+    starting_style = card_styles.index(discovery_style) if discovery_style in card_styles else 0
+    previous_photos, labels = [], []
+    previous_photo = None
+    for segment in visual_timeline:
+        key = segment["beat_id"]
+        previous_photos.append(previous_photo)
+        if storyboard.get(key, {}).get("kind") == "image":
+            previous_photo = key
+        labels.append(segment.get("callout_stat") or segment.get("search_query")
+                      or " ".join(segment["anchor_text"].split()[:5]))
 
     def native_size(width, height):
         return round(width * coordinate_scale), round(height * coordinate_scale)
+
+    def discovery_shot(slot, time):
+        segment = visual_timeline[slot]
+        elapsed = time - segment["start_time"]
+        duration = segment["end_time"] - segment["start_time"]
+        key, subpart = segment["beat_id"], segment["part"]
+        diagram_frames = ()
+        if segment.get("visual_type") == "diagram":
+            diagram_frames = load_diagram(key) if segment.get("diagram") and load_diagram else ()
+            if diagram_frames:
+                segment["diagram_template"] = segment["diagram"]["template"]
+            diagram_frames = diagram_frames or diagram
+        use_diagram = bool(diagram_frames)
+        record = load_visual(key) if key in storyboard and not use_diagram else None
+        classification = record["kind"] if record else ""
+        if use_diagram:
+            sequence, portrait, classification = diagram_frames, False, "diagram"
+        elif not record:
+            reused = previous_photos[slot]
+            same_label = slot and labels[slot].casefold() == labels[slot - 1].casefold()
+            if reused is not None and same_label:
+                record = load_visual(reused)
+                classification = "reframe" if record else ""
+            if not record:
+                if icon and credit_icon:
+                    credit_icon()
+                style = card_styles[(starting_style + slot) % len(card_styles)]
+                label = labels[slot]
+                if same_label and not segment.get("callout_stat"):
+                    label = " ".join(segment["anchor_text"].split()[:5])
+                segment["rendered_as"] = "callout_card"
+                return discovery_canvas(style, base, accent, time, label, elapsed, icon), None
+            sequence, portrait = record["images"], record["portrait"]
+        else:
+            sequence, portrait = record["images"], record["portrait"]
+        segment["rendered_as"] = classification
+        prior_id = previous_photos[slot]
+        prior_file = storyboard.get(prior_id, {}).get("path")
+        repeated_photo = bool(classification == "image" and prior_file and prior_file == record["path"])
+        framing = subpart or int(classification == "reframe" or repeated_photo)
+        if framing and not use_diagram:
+            segment["reframed"] = True
+        position = min(1, max(0, elapsed / max(.1, duration))) * (len(sequence) - 1)
+        index = int(position)
+        source = sequence[index]
+        if index + 1 < len(sequence) and position > index:
+            source = Image.blend(source, sequence[index + 1], position - index)
+        size = OUTPUT_SIZE if portrait else native_size(WIDTH, 405 if use_diagram else 490)
+        shot = camera_shot(source, size, elapsed, duration, zoom=0 if use_diagram else .12,
+                           reframe=0 if use_diagram else framing)
+        return (place_visual(shot, native_size(0, 294), time, portrait=portrait),
+                record.get("context_label") if record else None)
 
     for index in range(seconds * FPS):
         time = index / FPS
@@ -455,10 +578,24 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         replay_progress = min(1, max(0, (time - recap_start) / max(.1, outro - recap_start)))
         part = max(0, bisect_right(starts, time) - 1)
         beat = int(plan[part][0] == "answer")
-        credit = None
-        archive_shot = (bool(clip) or photograph is not None) and time < archive_duration
-        opacity = ease_cubic((archive_duration - time) / .65) if archive_shot else 0
-        if opacity < 1 and diagram and beat:
+        show_clip = bool(clip) and (time >= clip_start if contextual_clip else time < archive_duration)
+        archive_shot = show_clip or (photograph is not None and time < archive_duration)
+        opacity = (ease_cubic((time - clip_start) / .45) if contextual_clip and show_clip
+                   else ease_cubic((archive_duration - time) / .65) if archive_shot else 0)
+        active_segment = None
+        visual_context = None
+        if opacity < 1 and discovery_style:
+            slot = bisect_right(shot_starts, time) - 1
+            active_segment = visual_timeline[slot]
+            img, visual_context = discovery_shot(slot, time)
+            transition = min(.35, (active_segment["end_time"] - active_segment["start_time"]) / 2)
+            blend = ease_cubic((time - shot_starts[slot]) / transition)
+            if slot and blend < 1:
+                outgoing, outgoing_context = discovery_shot(slot - 1, time)
+                img = Image.blend(outgoing, img, blend)
+                if blend < .5:
+                    active_segment, visual_context = visual_timeline[slot - 1], outgoing_context
+        elif opacity < 1 and diagram and beat:
             diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
             if replay:
                 diagram_frame = round(replay_progress * (len(diagram) - 1))
@@ -489,28 +626,31 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
                                     native_size(WIDTH, 490), Image.Resampling.LANCZOS)
                 img = place_visual(shot, native_size(0, 306), time)
         if archive_shot:
-            frame = min(len(clip) - 1, int(time * len(clip) / archive_duration)) if clip else 0
-            source = clip[frame] if clip else photograph
-            label = visual_label or (CLIPS[topic["id"]]["label"] if clip else topic["archive"]["label"])
+            if show_clip:
+                clip_duration = seconds - clip_start if contextual_clip else archive_duration
+                frame = min(len(clip) - 1, int((time - clip_start) * len(clip) / clip_duration))
+                source = clip[frame]
+            else:
+                source = photograph
             portrait = source.height > source.width
             size = OUTPUT_SIZE if portrait else native_size(WIDTH, 405)
             shot = camera_shot(source, size, time, archive_duration, zoom=.08)
             archive_canvas = place_visual(shot, native_size(0, 310), time, portrait=portrait)
             img = archive_canvas if opacity == 1 else Image.blend(img, archive_canvas, opacity)
-            if opacity > .5:
-                credit = label
         draw = NativeOverlay(img)
         if not hindi:
             draw.rounded_rectangle((52, 124, 86 + badge_width, 173), radius=20, fill="#101A2B", outline=accent)
             draw.text((69, 149), badge, font=badge_font, fill=accent, anchor="lm")
-        if credit:
-            draw.text((348, 748), credit, font=native_font(18, True), fill="#F7F3EA",
-                      anchor="mm", stroke_width=2, stroke_fill="#121827")
-        if topic["scene"] == "discovery":
-            stage_label = topic["labels"][int(bool(beat))]
-            draw.multiline_text((360, 535), wrap(stage_label, label_font, 480), font=label_font,
-                                anchor="mm", align="center", fill="#F7F3EA")
-        if beat and topic["scene"] != "discovery" and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
+        if visual_context:
+            draw.text((360, 748), visual_context, font=label_font,
+                      fill="#F7F3EA", anchor="mm", stroke_width=2, stroke_fill="#121827")
+        if active_segment and active_segment["rendered_as"] != "callout_card" and active_segment.get("callout_stat"):
+            draw.text((360, 232), active_segment["callout_stat"], font=takeaway_font,
+                      fill="#F7F3EA", anchor="mm", stroke_width=2, stroke_fill="#121827")
+        if contextual_clip and show_clip and opacity > .5:
+            draw.text((360, 748), CLIPS[topic["id"]]["label"], font=label_font,
+                      fill="#F7F3EA", anchor="mm", stroke_width=2, stroke_fill="#121827")
+        if beat and not discovery_style and not recap and not hindi and not (archive_shot and (clip or photograph is not None)):
             label = topic["labels"][1]
             draw.text((348, 710), label, font=label_font if label_font.getlength(label) < 825 else native_font(20, True),
                       fill=accent, anchor="mm", stroke_width=2, stroke_fill="#121827")
@@ -554,6 +694,8 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             y = 930 + round(8 * (1 - progress) ** 3)
             draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
             draw.text((360, y + 30), END_CARD, font=native_font(27, True), fill="#F7F3EA", anchor="mm")
+        draw.rectangle((0, 0, WIDTH, 3), fill=base)
+        draw.rectangle((0, 0, WIDTH * (index + 1) / (seconds * FPS), 3), fill=accent)
         yield img
 
 
@@ -561,7 +703,7 @@ def _trim_pcm_silence(pcm, rate, threshold=320, pad_ms=45):
     import numpy as np
 
     samples = np.frombuffer(pcm, dtype="<i2")
-    active = np.flatnonzero(np.abs(samples.astype(np.int32)) > threshold)
+    active = np.flatnonzero(np.abs(samples) > threshold)
     if active.size == 0:
         return pcm
     pad = round(rate * pad_ms / 1000)
@@ -577,6 +719,7 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     direction = treatment(topic)
     speed, expression, rhythm = DELIVERY[direction["delivery"]]
     kokoro_voice = direction.get("kokoro_voice")
+
     def fit_narration():
         if kokoro_voice:
             from local_voices import kokoro_pcm, load_kokoro
@@ -602,12 +745,13 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
                     return wav.getframerate(), wav.readframes(wav.getnframes())
             if direction["voice"] == INDIAN_ENGLISH:
                 return windows_pcm(line, INDIAN_ENGLISH, 1 / length, destination.parent)
-            length *= {"hook": 1.02, "pause": 1.04, "answer": 1}[role]
+            if role == "hook":
+                length *= .96
             if kokoro_voice:
                 rate, pcm = kokoro_pcm(voice, line, kokoro_voice, min(1.45, 1 / length), kokoro_dir)
                 return rate, _trim_pcm_silence(pcm, rate)
-            config = SynthesisConfig(length_scale=length, noise_scale=expression, noise_w_scale=rhythm,
-                                     volume=.89 if role == "pause" else 1)
+            config = SynthesisConfig(length_scale=length, noise_scale=expression + (.07 if role == "hook" else 0), noise_w_scale=rhythm,
+                                     volume=.90 if role == "pause" else 1)
             chunks = voice.synthesize(line, syn_config=config)
             rate = voice.config.sample_rate
             pcm = b"".join(chunk.audio_int16_bytes for chunk in chunks)
@@ -635,16 +779,76 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
         wav.writeframes(audio)
+    if direction["voice"] != HINDI:
+        # Preserve pitch and reserve the end card. Cap the slowdown so the
+        # caller can shorten the export when the script still ends early.
+        stretch = min(1.18, (seconds - OUTRO_SECONDS - .05) / timings[-1][1])
+        if stretch < 1 or stretch >= 1.04:
+            import imageio_ffmpeg
+
+            adjusted = destination.with_suffix(".paced.wav")
+            ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
+            subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(destination),
+                            "-af", f"atempo={1 / stretch:.8f},apad", "-t", str(seconds),
+                            str(adjusted)], check=True)
+            adjusted.replace(destination)
+            timings = [(start * stretch, end * stretch) for start, end in timings]
     return timings
 
 
 def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *,
-           archive_path=None, use_clip=False, visual=None):
+           archive_path=None, use_clip=False, visual=None, storyboard=None, icon=None):
     import imageio_ffmpeg
 
     if (secret("USE_LOCAL_GPU") or "false").strip().lower() not in {"false", "0", "no"}:
         raise ValueError("This renderer is CPU-only. Set USE_LOCAL_GPU=false.")
     ffmpeg = os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
+    visual_credits = []
+    credited = set()
+    storyboard = storyboard or {}
+
+    def credit(record, shot):
+        key = (record["source"], shot)
+        if key in credited:
+            return
+        credited.add(key)
+        visual_credits.append({"shot": shot, **{key: record.get(key, False)
+                                                for key in ("credit", "source", "synthetic", "automatic")}})
+
+    failed_assets = set()
+
+    @lru_cache(maxsize=2)
+    def load_visual(beat_id):
+        if beat_id in failed_assets:
+            return None
+        record = storyboard[beat_id]
+        try:
+            if record["kind"] == "video":
+                portrait = footage.is_portrait(ffmpeg, record["path"])
+                images = footage.decode_frames(ffmpeg, record["path"], 12, portrait=portrait)
+                if not images:
+                    raise ValueError("Empty clip")
+            else:
+                with Image.open(record["path"]) as original:
+                    images = [original.convert("RGB")]
+                portrait = images[0].height > images[0].width
+        except (OSError, ValueError):
+            failed_assets.add(beat_id)
+            print(f"Could not decode visual beat {beat_id}; using motion graphics.")
+            return None
+        credit(record, f"beat-{beat_id}")
+        return dict(record, images=images, portrait=portrait)
+
+    icon_mask = None
+    if icon:
+        try:
+            from resvg_py import svg_to_bytes
+
+            with Image.open(io.BytesIO(svg_to_bytes(svg_path=str(icon["path"]), width=220))) as raster:
+                icon_mask = raster.convert("RGBA").getchannel("A")
+                icon_mask.thumbnail((220, 220), Image.Resampling.LANCZOS)
+        except (ImportError, OSError, ValueError, RuntimeError):
+            print("Could not rasterize the cached topic icon; using motion graphics.")
     clip = footage.decode(ffmpeg, topic["id"], FPS) if use_clip else ()
     if visual:
         if visual["kind"] == "video":
@@ -654,22 +858,46 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
                 raise ValueError("The selected stock clip could not be decoded.")
         else:
             archive_path = visual["path"]
+        credit(visual, "archive")
     if use_clip and not clip:
         raise ValueError("The reviewed footage did not decode. Check the cached file.")
-    diagram = ()
+    diagram, render_template = (), None
     if find_spec("manim") is not None:
-        from manim_diagrams import DIAGRAMS, render_diagram
+        try:
+            from manim_diagrams import DIAGRAMS, render_diagram, render_template
 
-        if topic["id"] in DIAGRAMS:
-            diagram = footage.decode_frames(ffmpeg, render_diagram(topic["id"], wav_path.parent, FPS), FPS)
-            if not diagram:
-                raise ValueError("The Manim diagram did not decode.")
-    caption_filter, caption_timing = ass_filter(
-        wav_path.parent, topic, spoken_plan(topic, beats), timings, seconds, wav_path)
+            diagram_id = topic["id"].removeprefix("discovered-").removeprefix("spark-")
+            if diagram_id in DIAGRAMS:
+                diagram = footage.decode_frames(ffmpeg, render_diagram(diagram_id, wav_path.parent, FPS), FPS)
+        except (ImportError, OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+            print(f"Manim unavailable for the curated insert ({type(error).__name__}); using graphics.")
+    plan = spoken_plan(topic, beats)
+    word_lines, caption_timing = build_word_timeline(wav_path, topic.get("language", "en"), plan, timings)
+    visual_timeline = resolve_visual_timeline(topic, word_lines, plan, timings, seconds)
+    specs = {item["beat_id"]: item["diagram"] for item in visual_timeline if item.get("diagram")}
+    failed_diagrams = set()
+
+    @lru_cache(maxsize=2)
+    def load_diagram(beat_id):
+        if render_template is None or beat_id in failed_diagrams:
+            return ()
+        try:
+            path = wav_path.parent / f"diagram-beat-{beat_id}.mp4"
+            if not path.is_file():
+                render_template(specs[beat_id], wav_path.parent, beat_id, 15)
+            decoded = footage.decode_frames(ffmpeg, path, 15)
+            if not decoded:
+                raise ValueError("No diagram frames decoded.")
+            return decoded
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+            failed_diagrams.add(beat_id)
+            print(f"Diagram beat {beat_id} unavailable ({type(error).__name__}); using its fallback.")
+            return ()
+    caption_filter = ass_filter(wav_path.parent, topic, plan, timings, seconds, word_lines)
     shutil.copyfile(wav_path.parent / "captions.ass", destination.with_name("captions.ass"))
     theme = treatment(topic)["soundtrack"]
     mastered, audio = master(ffmpeg, wav_path, seconds, topic, theme, SCORES[theme],
-                             motion_cues(topic, beats, timings, seconds))
+                             motion_cues(topic, beats, timings, seconds), visual_timeline=visual_timeline)
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}",
            "-framerate", str(FPS), "-i", "-", "-i", str(mastered), "-map", "0:v", "-map", "1:a",
@@ -678,8 +906,10 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
            "-movflags", "+faststart", "-t", str(seconds), str(destination)]
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, cwd=wav_path.parent) as process:
         try:
-            label = visual["credit"][:65] if visual else None
-            for image in frames(topic, beats, timings, seconds, archive_path, clip, diagram, label):
+            for image in frames(topic, beats, timings, seconds, archive_path, clip, diagram,
+                                visual_timeline=visual_timeline, storyboard=storyboard, load_visual=load_visual,
+                                load_diagram=load_diagram,
+                                icon=icon_mask, credit_icon=lambda: credit(icon, "fallback")):
                 process.stdin.write(image.tobytes())
         except BrokenPipeError:
             pass
@@ -690,5 +920,7 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     if poster:
         subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", "1",
                         "-i", str(destination), "-frames:v", "1", str(poster)], check=True)
-    return {"diagram_renderer": "manim" if diagram else "pillow", "caption_timing": caption_timing,
-            "resolution": list(OUTPUT_SIZE), "fps": FPS, "audio": audio}
+    used_manim = bool(diagram or any(item.get("diagram_template") for item in visual_timeline))
+    return {"diagram_renderer": "manim" if used_manim else "pillow", "caption_timing": caption_timing,
+            "resolution": list(OUTPUT_SIZE), "fps": FPS, "audio": audio, "visual_credits": visual_credits,
+            "visual_timeline": visual_timeline}

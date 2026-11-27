@@ -55,16 +55,20 @@ def align_words(text, start, end, detected):
     matcher = SequenceMatcher(None, [normalize(word) for word in words],
                               [normalize(item[0]) for item in hits], autojunk=False)
     starts = [None] * len(words)
+    finishes = [None] * len(words)
     for match in matcher.get_matching_blocks():
         for offset in range(match.size):
             starts[match.a + offset] = hits[match.b + offset][1]
+            finishes[match.a + offset] = hits[match.b + offset][2]
     anchors = [(-1, start)] + [(i, t) for i, t in enumerate(starts) if t is not None] + [(len(words), end)]
     for (left, a), (right, b) in zip(anchors, anchors[1:]):
         for index in range(left + 1, right):
             fraction = (index - left) / (right - left) if left >= 0 else index / max(1, right)
             starts[index] = a + (b - a) * fraction
     starts = [min(end, max(start, value)) for value in starts]
-    return words, starts
+    next_starts = [*starts[1:], end]
+    return [(word, begin, limit if finish is None else min(limit, max(begin, finish)))
+            for word, begin, finish, limit in zip(words, starts, finishes, next_starts)]
 
 
 def timestamp(seconds):
@@ -90,7 +94,14 @@ def _word_groups(words, max_words=3, max_chars=20):
     return groups
 
 
-def ass_filter(scratch, topic, plan, timings, seconds, wav):
+def build_word_timeline(wav, language, plan, timings):
+    detected = recognized_words(wav, language)
+    lines = [align_words(text, start, end, detected)
+             for (_, text, _), (start, end) in zip(plan, timings)]
+    return lines, "whisper" if detected else "estimated"
+
+
+def ass_filter(scratch, topic, plan, timings, seconds, word_lines):
     hindi = topic.get("language") == "hi"
     font_name = "Noto Sans Devanagari" if hindi else ("Arial" if os.name == "nt" else "DejaVu Sans")
     caption_size = 44 if hindi else 48
@@ -131,18 +142,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         script += line(0, seconds, "Header", escape(topic_badge(topic)))
         first_answer = next(start for (start, _), (role, _, _) in zip(timings, plan) if role == "answer")
         script += line(first_answer, seconds, "Label", escape(topic["labels"][1]))
-    detected = recognized_words(wav, topic.get("language", "en"))
-    for (_, text, _), (start, end) in zip(plan, timings):
-        words, starts = align_words(text, start, end, detected)
+    for word_line in word_lines:
+        words = [word for word, _, _ in word_line]
         ranges = _word_groups(words)
-        for index, begin in enumerate(starts):
-            finish = starts[index + 1] if index + 1 < len(starts) else end
-            if timestamp(finish) == timestamp(begin):
-                continue
+        for index, (_, begin, finish) in enumerate(word_line):
             group_start, group_end = ranges[index]
-            emphasis = r"{\c&H74F8FF&\fscx114\fscy114\t(0,100,\fscx100\fscy100)}"
-            phrase = " ".join(emphasis + escape(word) + r"{\r}" if position == index else escape(word)
-                              for position, word in enumerate(words) if group_start <= position < group_end)
-            script += line(begin, finish, "Caption", phrase)
+            plain = [escape(word) for word in words[group_start:group_end]]
+            if timestamp(finish) > timestamp(begin):
+                highlighted = plain.copy()
+                active = index - group_start
+                highlighted[active] = r"{\1c&H74F8FF&}" + highlighted[active] + r"{\rCaption}"
+                script += line(begin, finish, "Caption", " ".join(highlighted))
+            if index + 1 < group_end:
+                next_word = word_line[index + 1][1]
+                if timestamp(next_word) > timestamp(finish) and next_word - finish <= .35:
+                    script += line(finish, next_word, "Caption", " ".join(plain))
     (scratch / "captions.ass").write_text(script, encoding="utf-8")
-    return "ass=captions.ass" + fonts, "whisper" if detected else "estimated"
+    return "ass=captions.ass" + fonts

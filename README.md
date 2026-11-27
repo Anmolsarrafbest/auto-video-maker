@@ -77,18 +77,45 @@ python visuals.py venus-spin "Venus atmosphere" --provider nasa --use REVIEWED_I
 python visuals.py venus-spin "Venus atmosphere" --auto
 ```
 
-NASA requires no key. `--provider pexels` and `--provider pixabay` use free API
+NASA and Wikimedia Commons require no key. `--provider pexels` and `--provider pixabay` use free API
 keys named `PEXELS_API_KEY` and `PIXABAY_API_KEY` in `.env`. The selected
 asset is cached with its credit and source for offline rendering.
-With `--auto`, the tool searches NASA and any stock providers with keys
-configured, preferring relevant portrait HD assets. Pass `--provider` to
-restrict the search or `--pollinations-fallback` to try a keyless AI image
-if no match can be cached. Review automatically selected visuals before posting.
-To try a keyless generated illustration, use `--provider pollinations --use generate`
-with a descriptive prompt. If that endpoint requires authentication or payment,
-the command exits and the existing cache stays available. Generated visuals are
-credited and flagged in upload metadata. The default offline render uses the
-cached asset or a diagram without calling any visual API.
+With `--auto`, the tool searches NASA, Commons, and any stock providers with keys
+configured. It filters for relevance, then prefers suitable 9:16 footage and
+other portrait HD clips. Other clips and photos remain available. Pass `--provider` to
+restrict the search. Review automatically selected visuals before posting.
+
+Gemini discovery and Spark can select media for each timed visual beat. They put the results and credits in
+`assets-cache/visuals/<topic_id>.json`. A matching Iconify SVG can appear on
+fallback cards. Pass `--no-auto-visuals` to use cached assets only. Standard
+topic generation stays offline with `--offline`. To render an existing Spark
+idea offline, use `python spark_job.py --mode draft --offline --input spark-example.json`.
+An explicit `shorts.py generate --discover --offline` still calls Gemini for
+the script and skips trends and visual searches.
+
+Video durations are targets. The renderer adjusts speech tempo within a limited
+range and reserves the last two seconds for the follow card. When narration
+still finishes early, it shortens the export. The target, actual duration, and
+narration end time are recorded in `metadata.json`. Successful Gemini discovery drafts
+also include `gemini-discovery.json` with the accepted request body and model
+response for inspection. The file contains no API key.
+
+Each generation run creates one `output/output_YYYY-MM-DD_HH-MM-SS_microseconds_IST/`
+folder. A batch puts all its draft folders under that timestamp. Publishing
+commands still accept the individual draft folder name for older and newer drafts.
+Gemini batches also include `gemini-requests.json` with the request bodies sent
+for each draft, including retries. API keys are kept out of that file.
+
+For a documented event, discovery looks for event-specific archival media first.
+If the archive search comes up short, it can use relevant stock footage and labels
+that footage as illustrative on screen.
+
+Pollinations is optional. Leave `POLLINATIONS_API_KEY` and
+`POLLINATIONS_ZERO_COST_MODEL` blank for the keyless media pipeline. If you
+configure them, generation runs only when the live catalog confirms that the
+chosen image model has zero rates. This also applies to the manual
+`--pollinations-fallback` and `--provider pollinations --use generate`
+options. Generated images are credited and flagged as synthetic in metadata.
 
 ## How the Shorts pipeline works
 
@@ -96,11 +123,15 @@ To discover a new Short with Gemini across general history, science, arts,
 sports, and other subjects, run
 `python shorts.py generate --discover --seconds 15`. This uses the configured
 Gemini key and recent trend titles from India and the US, avoids previous
-titles, and writes a dialogue script and three-shot Flow prompt. The local
+titles, and writes a dialogue script and timed Flow prompt. The local
 renderer uses Kokoro or Piper and animated graphics. Review the draft and
 check the cited article before publishing. Add `--offline` to skip Trends
 and ask for an evergreen idea. Discovery still calls Gemini and returns a
 proposed source for editorial review.
+
+Use `--seconds 30` through `--seconds 45` to request a longer single discovery
+draft with five to eight visual beats. The resolved segments in `metadata.json`
+share word timings with the captions and last at most 4.5 seconds each.
 
 For five discovery drafts, run `python shorts.py generate --discover --count 5`.
 The app chooses five distinct lengths from 15 to 25 seconds before requesting
@@ -134,11 +165,24 @@ requires a repository-scoped fine-grained token with **Actions: write**.
 Keep that token in the caller's credential store.
 
 Use `source` for a direct citation supporting the narration, from an institution
-or publication appropriate to the subject. Optional `media_url` and
-`media_relevance` describe an exact photo or clip and how it supports the scene.
-The runner automatically imports supported public-domain, CC0, or CC BY files
-from Wikimedia Commons and includes the credit in the draft. Other links are
-retained as suggestions, and the draft falls back to original graphics.
+or publication appropriate to the subject. A modern payload uses a `beats` array
+with consecutive integer `beat_id` values, 2–5 word `anchor_text` phrases copied
+from the narration in order, a `visual_type` of `archival`, `stock_video`,
+`diagram`, or `callout_card`, a 2–4 word `search_query`, and optional
+`callout_stat`. The array needs five to eight beats for 30–45 second targets.
+An optional `icon_query` takes one or two words. The existing three-shot payload
+in `spark-example.json` remains valid. Optional `media_url` and `media_relevance`
+can identify an exact Commons photo or clip for the archive beat.
+
+For a Manim insert, set `visual_type` to `diagram` and supply a `diagram`
+object. Set its `template` to `timeline`, `comparison`, or `process`, and
+provide two to four `items` with short `label` strings. You can add a `title`.
+For `comparison`, give every item a nonnegative numeric `value` and use an
+optional shared `unit`. Manim is optional and renders these scenes with Cairo.
+Drafts include a pre-review report under `qa` in `metadata.json` with measured
+runtime, integrated loudness, and any threshold warnings.
+GitHub Actions can use the optional repository secrets `PEXELS_API_KEY` and
+`PIXABAY_API_KEY`. Keyless sources work with empty secrets.
 
 Set the repository Actions variable `SPARK_RENDER_ENABLED=true` after checking
 your included compute and configuring a hard spending stop. The default run creates a private

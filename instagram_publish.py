@@ -108,7 +108,7 @@ def publish_batch(jobs, platform="both"):
             if not shorts.has_token(shorts.TOKEN):
                 raise ValueError("Connect your YouTube channel first.")
             occupied = sum(shorts.read_json(path).get("attempt_date") == day
-                           for path in shorts.OUTPUT.glob("*/upload.json"))
+                           for path in shorts.OUTPUT.rglob("upload.json"))
             for job in jobs:
                 print(f"Publishing {job.name} on YouTube.", flush=True)
                 shorts.publish(job, "public", day, occupied + len(jobs), allow_reviewed=True)

@@ -48,6 +48,10 @@ jobs:
           SPARK_INSTAGRAM_USERNAME: ${{ vars.SPARK_INSTAGRAM_USERNAME }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           INSTAGRAM_PAGE_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_PAGE_ACCESS_TOKEN }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+          POLLINATIONS_ZERO_COST_MODEL: ${{ vars.POLLINATIONS_ZERO_COST_MODEL }}
           GH_TOKEN: ${{ github.token }}
         run: python spark_job.py --mode "$SPARK_MODE"
       - name: Save preview
@@ -56,8 +60,8 @@ jobs:
         with:
           name: spark-short
           path: |
-            output/spark-*/short.mp4
-            output/spark-*/metadata.json
-            output/spark-*/flow-prompt.txt
+            output/**/spark-*/short.mp4
+            output/**/spark-*/metadata.json
+            output/**/spark-*/flow-prompt.txt
           if-no-files-found: ignore
           retention-days: 1

@@ -3,7 +3,7 @@
 import math
 
 from manim import (Arrow, Circle, Create, Dot, Ellipse, FadeIn, GrowFromEdge, LEFT, Line,
-                   MoveAlongPath, Rectangle, Scene, Text, UP, VGroup, linear, tempconfig)
+                   MoveAlongPath, Rectangle, RoundedRectangle, Scene, Text, UP, VGroup, linear, tempconfig)
 
 
 class RainbowDrop(Scene):
@@ -159,13 +159,91 @@ DIAGRAMS = {"rainbow-split": RainbowDrop, "venus-spin": VenusPeriods, "mercury-d
             "chandrasekhar-limit-hi": WhiteDwarf, "moon-distance": MoonDistance, "sky-blue": RayleighSky}
 
 
-def render_diagram(topic_id, directory, fps):
-    destination = directory / "science-diagram.mp4"
+class BeatDiagram(Scene):
+    def __init__(self, spec):
+        self.spec = spec
+        super().__init__()
+
+    def heading(self):
+        title = self.spec["title"] or self.spec["template"].capitalize()
+        self.add(self.label(title, 42, 12).move_to((0, 3.1, 0)))
+
+    @staticmethod
+    def label(text, size=34, width=4):
+        item = Text(text, font_size=size, color="#E7F5F0", disable_ligatures=True)
+        if item.width > width:
+            item.scale_to_fit_width(width)
+        return item
+
+
+class TimelineScene(BeatDiagram):
+    def construct(self):
+        self.heading()
+        items = self.spec["items"]
+        self.play(Create(Line((-5.4, 0, 0), (5.4, 0, 0), color="#81DED0")), run_time=.4)
+        for index, item in enumerate(items):
+            x = -5 + 10 * index / (len(items) - 1)
+            direction = 1 if index % 2 == 0 else -1
+            mark = Line((x, 0, 0), (x, .7 * direction, 0), color="#81DED0")
+            label = self.label(item["label"], width=3.2).move_to((x, 1.25 * direction, 0))
+            self.play(Create(mark), FadeIn(label), run_time=.48)
+        self.wait(.65)
+
+
+class ComparisonBarScene(BeatDiagram):
+    def construct(self):
+        self.heading()
+        items = self.spec["items"]
+        maximum = max(item["value"] for item in items)
+        for index, item in enumerate(items):
+            y = 1.85 - index * 1.18
+            value = item["value"]
+            self.add(self.label(item["label"], width=3.1).move_to((-6, y, 0), aligned_edge=LEFT))
+            width = 6 * value / maximum
+            amount = f'{value:g} {self.spec["unit"]}'.strip()
+            number = self.label(amount, 31, 2.5).move_to((-2.5 + width + .2, y, 0), aligned_edge=LEFT)
+            if value:
+                bar = Rectangle(width=width, height=.46, fill_color="#64CBBD",
+                                fill_opacity=1, stroke_width=0).move_to((-2.5, y, 0), aligned_edge=LEFT)
+                self.play(GrowFromEdge(bar, LEFT), FadeIn(number), run_time=.5)
+            else:
+                self.play(FadeIn(number), run_time=.35)
+        self.wait(.65)
+
+
+class ProcessFlowScene(BeatDiagram):
+    def construct(self):
+        self.heading()
+        for index, item in enumerate(self.spec["items"]):
+            y = 1.8 - 1.35 * index
+            box = RoundedRectangle(width=8.4, height=.84, corner_radius=.18,
+                                   color="#81DED0", fill_color="#245650", fill_opacity=1).move_to((0, y, 0))
+            label = self.label(item["label"], width=7.8).move_to(box)
+            if index:
+                arrow = Arrow((0, y + .9, 0), (0, y + .45, 0), buff=0,
+                              color="#81DED0", max_tip_length_to_length_ratio=.35)
+                self.play(Create(arrow), run_time=.18)
+            self.play(FadeIn(VGroup(box, label)), run_time=.34)
+        self.wait(.6)
+
+
+TEMPLATES = {"timeline": TimelineScene, "comparison": ComparisonBarScene, "process": ProcessFlowScene}
+
+
+def _render_scene(scene, destination, fps):
     with tempconfig({
         "renderer": "cairo", "pixel_width": 1080, "pixel_height": 608, "frame_rate": fps,
-        "background_color": "#102C2A", "media_dir": str(directory / "manim"),
+        "background_color": "#102C2A", "media_dir": str(destination.parent / "manim"),
         "output_file": str(destination), "format": "mp4", "progress_bar": "none",
         "verbosity": "WARNING", "disable_caching": True,
     }):
-        DIAGRAMS[topic_id]().render()
+        scene().render()
     return destination
+
+
+def render_diagram(topic_id, directory, fps):
+    return _render_scene(DIAGRAMS[topic_id], directory / "science-diagram.mp4", fps)
+
+
+def render_template(spec, directory, beat_id, fps):
+    return _render_scene(lambda: TEMPLATES[spec["template"]](spec), directory / f"diagram-beat-{beat_id}.mp4", fps)

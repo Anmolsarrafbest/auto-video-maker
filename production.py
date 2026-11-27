@@ -1,5 +1,7 @@
 """Editorial choices and voice credits for each Short."""
 
+import random
+
 from local_secrets import secret
 
 VOICE = "en_US-hifi_tts_92-medium"
@@ -54,6 +56,18 @@ SCORES = {
 }
 
 TOPIC_THEMES = {"jupiter-spin": "copper", "katherine-johnson": "paper"}
+DISCOVERY_TREATMENTS = {
+    "field-notes": ("paper", "#F7D9A0"),
+    "waveform": ("ocean", "#8DE8F7"),
+    "cut-paper": ("copper", "#FFC389"),
+    "spotlight": ("observatory", "#C9B8FF"),
+    "grid": ("lab", "#AFF0B6"),
+}
+
+
+def discovery_treatment(topic, style=None):
+    style = style or random.Random(topic["id"]).choice(tuple(DISCOVERY_TREATMENTS))
+    return dict(topic, discovery_style=style, color=DISCOVERY_TREATMENTS[style][1])
 TOPIC_VOICES = {
     "wright-first-flight": JOE,
     "leavitt-stars": VOICE,
@@ -72,6 +86,8 @@ def treatment(topic):
     if topic.get("format") == "demo":
         theme = "lab"
     theme = TOPIC_THEMES.get(topic.get("id"), theme)
+    if topic.get("discovery_style") in DISCOVERY_TREATMENTS:
+        theme, _ = DISCOVERY_TREATMENTS[topic["discovery_style"]]
     voice, delivery, soundtrack = TREATMENTS[theme]
     voice = TOPIC_VOICES.get(topic.get("id"), voice)
     language = topic.get("language", "en")

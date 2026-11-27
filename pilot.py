@@ -42,8 +42,9 @@ def run():
     shorts.setup_voice()
     topics = {topic["id"]: topic for topic in shorts.read_json(shorts.ROOT / "topics.json")}
     trends = {region: shorts.fetch_trends(region) for region in ("IN", "US")}
+    batch = shorts.new_output_batch()
     for topic_id in pending[:remaining]:
-        job = shorts.OUTPUT / topic_id
+        job = batch / topic_id
         shorts.render_job(topics[topic_id], "Cloud pilot", 15, job, trends=trends)
         receipts[topic_id] = {"date": date}
         checkpoint(receipts, f"Reserve pilot upload for {topic_id}")

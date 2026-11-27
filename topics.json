@@ -16,8 +16,8 @@
     "id": "wright-first-flight", "category": "History", "format": "story", "scene": "flight", "color": "#EEC48B",
     "title": "The Wright brothers’ twelve-second flight", "labels": ["KITTY HAWK, 1903", "12 SECONDS · 120 FEET"],
     "aliases": ["wright brothers", "wright flyer", "kitty hawk first flight"],
-    "beats": ["The Wright brothers' first flight lasted twelve seconds.", "Orville flew just one hundred twenty feet. That short distance marked a breakthrough for controlled, powered flight."],
-    "source": "https://www.nps.gov/articles/wrightflyer.htm",
+    "beats": ["Twelve seconds in the air. That's all Orville Wright managed on the first flight.", "He covered just one hundred twenty feet. By the fourth flight that same day, Wilbur stayed in the air for nearly a minute. Years later, a camera went up with Wilbur in Italy."],
+    "source": "https://www.loc.gov/classroom-materials/inventive-wright-brothers/",
     "archive": {
       "image": "https://cdn.loc.gov/service/pnp/cph/3a50000/3a53000/3a53200/3a53266v.jpg",
       "source": "https://www.loc.gov/resource/cph.3a53266/",

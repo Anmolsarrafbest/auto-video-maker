@@ -2,8 +2,10 @@
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -27,6 +29,42 @@ def review_signature(job):
         name: hashlib.sha256((job / name).read_bytes()).hexdigest()
         for name in ("short.mp4", "metadata.json")
     }
+
+
+def inspect_draft(video, metadata):
+    """Measure the encoded audio and report review warnings without blocking release."""
+    import imageio_ffmpeg
+
+    warnings = []
+    for beat in metadata.get("visual_timeline", []):
+        duration = beat["end_time"] - beat["start_time"]
+        if duration > 5:
+            warnings.append(f'Visual beat {beat["beat_id"]} holds for {duration:.2f}s (limit 5.0s).')
+    probe = [os.getenv("SHORTS_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-hide_banner",
+             "-i", str(video), "-map", "0:a:0", "-vn", "-af", "ebur128=framelog=verbose", "-f", "null", "-"]
+    try:
+        report = subprocess.run(probe, capture_output=True, text=True, errors="replace",
+                                check=True, timeout=45).stderr
+    except (OSError, subprocess.SubprocessError):
+        warnings.append("FFmpeg could not measure runtime and loudness.")
+        return {"duration_seconds": None, "integrated_lufs": None, "warnings": warnings}
+    duration_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", report)
+    actual = None
+    if duration_match:
+        hours, minutes, seconds = map(float, duration_match.groups())
+        actual = round(hours * 3600 + minutes * 60 + seconds, 3)
+        target = metadata.get("target_duration_seconds")
+        if target and abs(actual - target) / target > .25:
+            warnings.append(f"Exported runtime {actual:g}s differs from the {target:g}s target by more than 25%.")
+    else:
+        warnings.append("FFmpeg did not report the exported runtime.")
+    loudness = re.findall(r"^\s*I:\s*(-?[\d.]+)\s+LUFS", report, re.MULTILINE)
+    integrated = float(loudness[-1]) if loudness else None
+    if integrated is None:
+        warnings.append("FFmpeg did not report integrated loudness.")
+    elif not -16 <= integrated <= -12:
+        warnings.append(f"Integrated loudness is {integrated:g} LUFS (review range -16 to -12 LUFS).")
+    return {"duration_seconds": actual, "integrated_lufs": integrated, "warnings": warnings}
 
 
 def approval_matches(job):
@@ -70,6 +108,7 @@ def prepare(args, topics):
         print("No unused sourced topics are available.")
         return
     trends = {} if args.offline else {region: shorts.fetch_trends(region) for region in ("IN", "US")}
+    batch = shorts.new_output_batch()
     for topic in selected:
         if getattr(args, "auto_visuals", False) and not args.offline:
             import visuals
@@ -82,7 +121,7 @@ def prepare(args, topics):
                     shorts.save_json(visuals.CACHE / f"{topic['id']}.json", cached)
                 except (shorts.requests.RequestException, OSError, ValueError) as error:
                     print(f"Auto visual skipped for {topic['id']} ({type(error).__name__}).", file=sys.stderr)
-        job = shorts.OUTPUT / f"{PREFIX}{topic['id']}"
+        job = batch / f"{PREFIX}{topic['id']}"
         shorts.render_job(topic, "Review queue", args.seconds, job, trends=trends)
         print(f"Awaiting review: {job.name}")
 
@@ -150,6 +189,12 @@ def approve(job, topics):
         if other != job and ((other / "review.json").is_file() or (other / "upload.json").is_file()):
             if review_signature(other)["short.mp4"] == signature["short.mp4"]:
                 raise ValueError(f"The same video file already appears in {other.name}.")
+    if "qa" not in meta:
+        meta["qa"] = inspect_draft(job / "short.mp4", meta)
+        shorts.save_json(job / "metadata.json", meta)
+        signature = review_signature(job)
+    for warning in meta["qa"]["warnings"]:
+        print(f"Review warning: {warning}")
     shorts.save_json(job / "review.json", signature)
     print(f"Approved: {job.name}")
 
@@ -169,7 +214,7 @@ def publish(args):
         if record.is_file() and shorts.read_json(record).get("video_id"):
             continue
         used_today = sum(shorts.read_json(path)["attempt_date"] == date
-                         for path in shorts.OUTPUT.glob("*/upload.json") if path != record)
+                         for path in shorts.OUTPUT.rglob("upload.json") if path != record)
         if used_today >= limit:
             break
         shorts.publish(job, args.visibility, date, limit, allow_reviewed=True)

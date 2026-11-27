@@ -108,7 +108,29 @@ def midi_music(destination, theme, score, topic_id, seconds):
     return True
 
 
-def master(ffmpeg, narration, seconds, topic, theme, score, cues):
+def transition_cues(visual_timeline, outro):
+    """Place low-peak accents while leaving room around the opening and outro."""
+    cues = []
+    for segment in visual_timeline:
+        time = segment["start_time"]
+        if time < .45 or time >= outro - .45:
+            continue
+        callout = not segment["part"] and (segment.get("callout_stat") or segment.get("visual_type") == "callout_card")
+        if callout:
+            cue = (time, "pop", .16, -27, True)
+        elif segment.get("visual_type") == "archival" and not segment["part"] and (CACHE / "sfx" / "shutter.wav").is_file():
+            cue = (time, "shutter", .18, -30, False)
+        else:
+            cue = (time, "whoosh", .24, -31, False)
+        if cues and time - cues[-1][0] < .45:
+            if callout and not cues[-1][-1] and (len(cues) == 1 or time - cues[-2][0] >= .45):
+                cues[-1] = cue
+            continue
+        cues.append(cue)
+    return [cue[:4] for cue in cues]
+
+
+def master(ffmpeg, narration, seconds, topic, theme, score, cues, *, visual_timeline=()):
     folder = CACHE / "music" / theme
     tracks = sorted(path for path in folder.glob("*") if path.suffix.lower() in {".mp3", ".wav"})
     if not tracks:
@@ -141,17 +163,27 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues):
     effect = topic.get("episode_plan", {}).get("sound", "sweep")
     cue_count = 0
     reveal, outro = cues
-    cue_plan = ((0, "whoosh", .30, -21),
-                (reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65, -19),
-                (outro, "chime", .65, -16))
-    for time, filename, duration, target in cue_plan:
+    accents = transition_cues(visual_timeline, outro)
+    opening_pop = visual_timeline and visual_timeline[0].get("callout_stat")
+    cue_plan = [(0, "pop", .16, -27) if opening_pop else (0, "whoosh", .30, -21),
+                (outro, "chime", .65, -16)]
+    if not any(abs(time - reveal) < .45 for time, *_ in accents):
+        cue_plan.append((reveal, {"sweep": "whoosh", "pop": "pop", "chime": "chime"}[effect], .65, -19))
+    peaks = {}
+    placed_accents = []
+    for (time, filename, duration, target), transition in sorted(
+        [(cue, False) for cue in cue_plan] + [(cue, True) for cue in accents]
+    ):
         path = CACHE / "sfx" / f"{filename}.wav"
         if path.is_file():
-            analysis = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path), "-t", str(duration),
-                                       "-af", "volumedetect", "-f", "null", "-"],
-                                      capture_output=True, text=True, check=True)
-            peak = re.search(r"max_volume:\s*(-?[\d.]+) dB", analysis.stderr)
-            gain = min(9, target - float(peak[1])) if peak else target
+            key = (path, duration)
+            if key not in peaks:
+                analysis = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path), "-t", str(duration),
+                                           "-af", "volumedetect", "-f", "null", "-"],
+                                          capture_output=True, text=True, check=True)
+                peak = re.search(r"max_volume:\s*(-?[\d.]+) dB", analysis.stderr)
+                peaks[key] = float(peak[1]) if peak else 0
+            gain = min(9, target - peaks[key])
             cmd += ["-i", str(path)]
             label = f"[cue{next_input}]"
             graph.append(f"[{next_input}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
@@ -161,10 +193,12 @@ def master(ffmpeg, narration, seconds, topic, theme, score, cues):
             mix.append(label)
             next_input += 1
             cue_count += 1
+            if transition:
+                placed_accents.append({"time": round(time, 3), "effect": filename})
     graph.append("".join(mix) + f"amix=inputs={len(mix)}:duration=first:normalize=0,"
                  "loudnorm=I=-14:TP=-1.5:LRA=11[out]")
     destination = narration.with_name("master.wav")
     subprocess.run(cmd + ["-filter_complex", ";".join(graph), "-map", "[out]", "-ar", "48000",
                           "-ac", "2", "-t", str(seconds), str(destination)], check=True)
-    return destination, {"music": music, "sfx_cues": cue_count,
+    return destination, {"music": music, "sfx_cues": cue_count, "transition_sfx": placed_accents,
                          "track": source.name if music == "local track" else None}

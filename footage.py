@@ -19,7 +19,8 @@ def setup(topic_id):
     CACHE.mkdir(exist_ok=True)
     if not path.is_file():
         temporary = path.with_suffix(".part")
-        with requests.get(CLIPS[topic_id]["url"], stream=True, timeout=(15, 45)) as response:
+        with requests.get(CLIPS[topic_id]["url"], stream=True, timeout=(15, 45),
+                          headers={"User-Agent": "AutoVideoMaker/1.1 (https://github.com/Anmolsarrafbest/auto-video-maker)"}) as response:
             response.raise_for_status()
             count = 0
             with temporary.open("wb") as output:
@@ -33,7 +34,7 @@ def setup(topic_id):
 
 
 def decode(ffmpeg, topic_id, fps):
-    return decode_frames(ffmpeg, cache_file(topic_id), fps)
+    return decode_frames(ffmpeg, cache_file(topic_id), fps, offset=CLIPS[topic_id].get("offset", 0))
 
 
 def is_portrait(ffmpeg, path):
@@ -42,12 +43,12 @@ def is_portrait(ffmpeg, path):
     return bool(size and int(size[1]) < int(size[2]))
 
 
-def decode_frames(ffmpeg, path, fps, *, portrait=False):
+def decode_frames(ffmpeg, path, fps, *, portrait=False, offset=0):
     width, height = (720, 1280) if portrait else (1080, 608)
     stride = width * height * 3
     frames = []
     with subprocess.Popen(
-        [ffmpeg, "-v", "error", "-i", str(path), "-t", "4",
+        [ffmpeg, "-v", "error", "-ss", str(offset), "-i", str(path), "-t", "4",
          "-vf", f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
          "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
