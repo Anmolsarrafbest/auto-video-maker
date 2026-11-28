@@ -19,7 +19,7 @@ from audio_master import master
 from local_secrets import secret
 from local_voices import windows_pcm
 from production import HINDI, INDIAN_ENGLISH, SCORES, treatment
-from storyboard import CLIPS, episode, resolve_visual_timeline
+from storyboard import CLIPS, MIN_DURATION_SEC, episode, resolve_visual_timeline
 from visuals import keywords
 import footage
 
@@ -788,8 +788,13 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
         audio.extend(clip)
         timings.append((start / rate, end / rate))
     reserve = .04 if topic.get("loop") else OUTRO_SECONDS
-    padded_seconds = max(seconds, math.ceil(end / rate + reserve))
-    audio.extend(bytes(2 * round(padded_seconds * rate) - len(audio)))
+    audio_seconds = end / rate + reserve
+    measured_seconds = round(audio_seconds, 3) if topic.get("loop") else math.ceil(audio_seconds)
+    if seconds is None:
+        padded_seconds = max(MIN_DURATION_SEC if topic.get("discovery") else 1, measured_seconds)
+    else:
+        padded_seconds = max(seconds, measured_seconds)
+    audio.extend(bytes(max(0, 2 * round(padded_seconds * rate) - len(audio))))
     with wave.open(str(destination), "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
         wav.writeframes(audio)

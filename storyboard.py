@@ -5,8 +5,10 @@ import re
 
 from production import treatment
 
+MIN_DURATION_SEC = 12
+MAX_DURATION_SEC = 85
 DURATIONS = (10, 12, 15, 18, 20, 25)
-DISCOVERY_DURATIONS = range(15, 46)
+DISCOVERY_DURATIONS = range(MIN_DURATION_SEC, MAX_DURATION_SEC + 1)
 VISUAL_TYPES = ("archival", "stock_video", "diagram", "callout_card")
 DIAGRAM_TEMPLATES = ("timeline", "comparison", "process")
 MAX_VISUAL_SECONDS = 4.5
@@ -102,8 +104,8 @@ def validate_diagram(data):
     return {"template": template, "title": title.strip(), "unit": unit.strip(), "items": normalized}
 
 
-def validate_visual_beats(beats, narration, seconds):
-    minimum = 5 if seconds >= 30 else 2
+def validate_visual_beats(beats, narration, seconds=None):
+    minimum = 5 if (seconds is not None and seconds >= 30) else 2
     if not isinstance(beats, list) or not minimum <= len(beats) <= 8:
         raise ValueError(f"Supply {minimum} to 8 visual beats.")
     words = anchor_tokens(" ".join(narration))

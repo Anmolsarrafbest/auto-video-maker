@@ -18,9 +18,9 @@ on:
           - '4'
           - '5'
       seconds:
-        description: Target duration in seconds when count is 1 (15-45)
+        description: Optional target duration in seconds when count is 1 (12-85; blank = audio-driven)
         required: false
-        default: '20'
+        default: ''
         type: string
       hq_script:
         description: Use Gemini 4 Hydrogen for script generation only (18 RPD cap)

@@ -30,7 +30,8 @@ import visuals
 from production import (ATTRIBUTION, DISCOVERY_TREATMENTS, VOICE_CREDITS, VOICE_SNAPSHOT,
                         discovery_treatment, treatment, voice_credit)
 from render import OUTRO_SECONDS, encode, narration, spoken_plan
-from storyboard import (CLIPS, DIAGRAM_TEMPLATES, DISCOVERY_DURATIONS, DURATIONS, VISUAL_TYPES, episode, flow_prompt,
+from storyboard import (CLIPS, DIAGRAM_TEMPLATES, DISCOVERY_DURATIONS, DURATIONS, MAX_DURATION_SEC,
+                        MIN_DURATION_SEC, VISUAL_TYPES, anchor_tokens, episode, find_anchor, flow_prompt,
                         validate_diagram, validate_visual_beats, visual_beat_text)
 from local_secrets import secret
 from youtube import has_token, read_json, read_token, save_json, sign_in, upload
@@ -57,6 +58,7 @@ BANNED_OPENERS = re.compile(
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite"
 GEMINI_HQ_MODEL = "gemini-4-hydrogen"
 GEMINI_ENDPOINT = rate_limiter.gemini_endpoint(GEMINI_DEFAULT_MODEL)
+DISCOVERY_MAX_WORDS = 200
 
 
 def render_treatment(topic):
@@ -428,6 +430,67 @@ def normalize_discovery_beats(beats, title, category):
     return normalized
 
 
+def _resync_beats_for_narration(beats, hook, explanation, title="", category=""):
+    """Keep only beats whose anchors still match narration in order, ensuring >= 2 valid beats."""
+    normalized = normalize_discovery_beats(beats, title, category)
+    if not isinstance(normalized, list):
+        normalized = []
+    words = anchor_tokens(f"{hook} {explanation}")
+    cursor = 0
+    kept = []
+    for beat in normalized:
+        if not isinstance(beat, dict):
+            continue
+        anchor = str(beat.get("anchor_text") or "").strip()
+        tokens = anchor_tokens(anchor)
+        if not 2 <= len(tokens) <= 5:
+            continue
+        found = find_anchor(words, tokens, cursor)
+        if found is None:
+            continue
+        cursor = found + 1
+        updated = dict(beat, beat_id=len(kept))
+        kept.append(updated)
+    if len(kept) < 2:
+        fallback_lines = [hook, explanation]
+        kept = []
+        for idx, line in enumerate(fallback_lines):
+            raw_words = [re.sub(r"[^\w'-]", "", w) for w in line.split()]
+            clean_words = [w for w in raw_words if re.search(r"\w", w)][:3]
+            if len(clean_words) < 2:
+                continue
+            kept.append({
+                "beat_id": len(kept),
+                "anchor_text": " ".join(clean_words),
+                "visual_type": "stock_video" if idx else "callout_card",
+                "search_query": _normalize_search_query("", title, line, category),
+            })
+    return kept
+
+
+def trim_narration_to_limits(hook, explanation, beats=None, *, max_words=DISCOVERY_MAX_WORDS,
+                           max_chars=1400, title="", category=""):
+    """Trim explanation cleanly at the last complete sentence boundary within limits."""
+    hook_words = len(hook.split())
+    budget_words = max(12, max_words - hook_words)
+    sentences = [part.strip() for part in re.split(r"(?<=[a-z0-9\"'][.!?])\s+", explanation.strip()) if part.strip()]
+    chosen = []
+    for sentence in sentences:
+        candidate = " ".join([*chosen, sentence]).strip()
+        if chosen and (len(candidate.split()) > budget_words or len(candidate) > max_chars):
+            break
+        chosen.append(sentence)
+    trimmed = " ".join(chosen).strip() if chosen else explanation.strip()
+    if len(trimmed.split()) > budget_words or len(trimmed) > max_chars:
+        words = trimmed.split()[:budget_words]
+        trimmed = " ".join(words).rstrip(",;:-") + "."
+        if len(trimmed) > max_chars:
+            trimmed = trimmed[:max_chars - 1].rsplit(" ", 1)[0].rstrip(",;:-") + "."
+    warning = f"Trimmed narration at a sentence boundary to fit under {max_words} words / {MAX_DURATION_SEC}s."
+    synced_beats = _resync_beats_for_narration(beats or [], hook, trimmed, title, category)
+    return trimmed, synced_beats, warning
+
+
 def discover_topic(seconds, trends, previous_titles, *, subject_area=None, requests_sent=None,
                    hq_script=False, loop=False):
     key = secret("GEMINI_FREE_API_KEY").strip()
@@ -435,8 +498,8 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         raise ValueError("Set GEMINI_FREE_API_KEY to discover new topics.")
     fields = ("title", "category", "hook", "explanation", "opening_label", "payoff_label",
               "source", "trend", "instagram_tags")
-    minimum_beats = 5 if seconds >= 30 else 2
-    beat_target = "five to eight" if seconds >= 30 else "three to five"
+    minimum_beats = 5 if (seconds is not None and seconds >= 30) else 2
+    beat_target = "five to eight" if (seconds is not None and seconds >= 30) else "four to eight"
     reserved = 0 if loop else OUTRO_SECONDS
     context = {"trends": {region: titles[:12] for region, titles in trends.items()},
                "avoid_repeating": previous_titles[:80]}
@@ -448,9 +511,22 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         if loop else
         "The last two video seconds are reserved for the follow card. End the explanation with a separate short payoff sentence. "
     )
+    if seconds is None:
+        length_guidance = (
+            "Pitch one original vertical Short and write its exact English dialogue. "
+            "Write a punchy, complete Short of roughly 60 to 110 words (about 25 to 48 seconds at natural 1.0x pacing). "
+        )
+    else:
+        low_words = round(max(12, seconds - reserved) * 2.2)
+        high_words = round(max(15, seconds - reserved) * 2.4)
+        length_guidance = (
+            f"Pitch one original vertical Short and write its exact English dialogue. "
+            f"Aim for roughly {low_words} to {high_words} spoken words (~{seconds}s at natural 1.0x pacing) as a soft creative guideline, "
+            f"and keep the full script well under {DISCOVERY_MAX_WORDS} words. "
+        )
     instruction = (
         "Act as an expert short-form video scriptwriter. "
-        f"Pitch one original {seconds}-second vertical Short and write its exact English dialogue. "
+        f"{length_guidance}"
         "Choose any subject, including general history, science history, arts, sports, nature, or everyday life. "
         "Exclude politics and religion. Label the subject with a short category of at most 32 characters. "
         "If a subject_area is supplied, choose a topic in that area. "
@@ -460,8 +536,6 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         "Strictly ban generic openings such as 'Did you know', 'In this video', or 'Have you ever wondered'. "
         "Beat 0 must open immediately with a concrete visual hook or surprising contrast paired with a punchy callout_stat. "
         "Then explain how we know and end with a surprising takeaway. Use a declarative hook. "
-        f"Target {round((seconds - reserved) * 2.2)} to {round((seconds - reserved) * 2.4)} "
-        "total spoken words for hook and explanation. "
         f"{ending_instruction}"
         "Use the time for a concrete detail or example supported by the source. Avoid filler or repeating the hook. "
         "Use simple spoken punctuation and spell out numbers. Supply two short labels (each <= 38 characters). "
@@ -496,6 +570,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
     )
     correction = ""
     active_model = GEMINI_DEFAULT_MODEL
+    script_warnings = []
     max_attempts = 3
     for attempt in range(max_attempts):
         request_body = {"contents": [{"parts": [{"text": instruction + correction}]}],
@@ -548,14 +623,30 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                 correction = ("\nDo not start the hook with generic phrases like 'Did you know', "
                               "'In this video', or 'Have you ever wondered'. Open with a concrete visual hook.")
                 continue
-            if sum(len(result[name].split()) for name in ("hook", "explanation")) > math.ceil((seconds - reserved) * 2.4):
-                if attempt == max_attempts - 1:
-                    raise ValueError("Gemini repeatedly returned narration that was too long.")
-                correction = (f"\nReturn the complete plan again with at most {math.ceil((seconds - reserved) * 2.4)} spoken words. "
-                              "Count only the hook and explanation.")
-                continue
+            word_count = sum(len(result[name].split()) for name in ("hook", "explanation"))
+            est_seconds = word_count / 2.2 + reserved
+            raw_beats = model_output.get("beats")
+            if word_count > DISCOVERY_MAX_WORDS or est_seconds > MAX_DURATION_SEC:
+                if attempt < max_attempts - 1:
+                    correction = (
+                        f"\nThat script is too long ({word_count} words / ~{round(est_seconds)}s). "
+                        f"Condense and shorten it to roughly 60 to 110 words (well under {DISCOVERY_MAX_WORDS} words "
+                        f"and {MAX_DURATION_SEC}s) while keeping the hook and complete takeaway."
+                    )
+                    continue
+                trimmed_expl, raw_beats, trim_warn = trim_narration_to_limits(
+                    result["hook"],
+                    result["explanation"],
+                    raw_beats,
+                    max_words=min(DISCOVERY_MAX_WORDS, int((MAX_DURATION_SEC - reserved) * 2.2)),
+                    title=result["title"],
+                    category=result["category"],
+                )
+                result["explanation"] = trimmed_expl
+                script_warnings.append(trim_warn)
+                print(trim_warn, file=sys.stderr)
             normalized_beats = normalize_discovery_beats(
-                model_output.get("beats"), result["title"], result["category"],
+                raw_beats, result["title"], result["category"],
             )
             try:
                 visual_beats = validate_visual_beats(normalized_beats,
@@ -605,6 +696,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
             "format": "story", "opening": "statement", "scene": "discovery", "color": "#91DFDA",
             "beats": [result["hook"], result["explanation"]], "source": result["source"], "aliases": [],
             "labels": [result["opening_label"], result["payoff_label"]], "loop": bool(loop),
+            **({"script_warnings": script_warnings} if script_warnings else {}),
             "gemini_exchange": {"model": active_model, "request": request_body, "response": model_output},
             "discovery": {"trend": matched_trend, "instagram_tags": re.findall(r"#[\w]{2,45}\b", result["instagram_tags"])[:4],
                           "beats": visual_beats, "icon_query": icon, "real_event": archival,
@@ -621,13 +713,14 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         topic = dict(topic, loop=True)
     if topic.get("discovery") and not topic.get("discovery_style"):
         topic = discovery_treatment(topic)
-    beats = topic["beats"]
+    beats = list(topic["beats"])
     direction = render_treatment(topic)
     if topic.get("discovery_style"):
         direction["discovery_style"] = topic["discovery_style"]
-    seconds = seconds or episode(topic)[0]
-    target_seconds = seconds
+    target_seconds = seconds if topic.get("discovery") else (seconds or episode(topic)[0])
+    seconds = target_seconds
     episode_plan = None
+    runtime_warnings = list(topic.get("script_warnings") or [])
     if planner == "gemini":
         assets = {name: direction[name] for name in ("clip_source", "archive_source") if name in direction}
         try:
@@ -676,14 +769,43 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
                 episode_plan = None
             timings = write_audio(beats)
         narration_end = timings[-1][1]
+        reserve = .04 if topic.get("loop") else OUTRO_SECONDS
+        if topic.get("discovery") and narration_end + reserve > MAX_DURATION_SEC:
+            speech_cap = MAX_DURATION_SEC - reserve
+            plan = spoken_plan(topic, beats)
+            answers = [text for (role, text, _), (_, end_time) in zip(plan, timings)
+                       if role == "answer" and end_time <= speech_cap]
+            if not answers:
+                answers = [text for role, text, _ in plan if role == "answer"][:1]
+            candidate_expl = " ".join(answers).strip()
+            trimmed_expl, synced_beats, _ = trim_narration_to_limits(
+                beats[0],
+                candidate_expl or beats[1],
+                topic["discovery"].get("beats"),
+                max_words=max(20, int(speech_cap * 2.1)),
+                title=topic["title"],
+                category=topic["category"],
+            )
+            beats = [beats[0], trimmed_expl]
+            if synced_beats:
+                topic = {**topic, "discovery": {**topic["discovery"], "beats": synced_beats}}
+            timings = write_audio(beats)
+            narration_end = timings[-1][1]
+            trim_msg = f"Trimmed narration at a sentence boundary to fit within {MAX_DURATION_SEC}s."
+            if trim_msg not in runtime_warnings:
+                runtime_warnings.append(trim_msg)
+            print(trim_msg, file=sys.stderr)
         if topic.get("loop"):
             seconds = round(narration_end + .04, 3)
-            if seconds != target_seconds:
-                print(f"Setting loop duration from narration ({target_seconds}s target, {seconds}s export).")
         else:
             seconds = math.ceil(narration_end + OUTRO_SECONDS)
-            if seconds != target_seconds:
-                print(f"Ending after the recap and follow card ({target_seconds}s target, {seconds}s export).")
+        if topic.get("discovery"):
+            seconds = min(MAX_DURATION_SEC, max(MIN_DURATION_SEC, seconds))
+        if target_seconds is None:
+            print(f"Audio-driven duration: {seconds}s (narration ends at {narration_end:.2f}s).")
+        elif seconds != target_seconds:
+            label = "Setting loop duration from narration" if topic.get("loop") else "Ending after the recap and follow card"
+            print(f"{label} ({target_seconds}s target, {seconds}s export).")
         brief = flow_prompt(topic, timings, seconds, spoken_plan(topic, beats), "clip_source" in direction)
         original_brief = brief
         if archive_path:
@@ -756,6 +878,9 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
         from queue_publish import inspect_draft
 
         draft_metadata["qa"] = inspect_draft(scratch / "short.mp4", draft_metadata)
+        for warning in runtime_warnings:
+            if warning not in draft_metadata["qa"]["warnings"]:
+                draft_metadata["qa"]["warnings"].append(warning)
         for warning in draft_metadata["qa"]["warnings"]:
             print(f"Review warning: {warning}")
         save_json(scratch / "metadata.json", draft_metadata)
@@ -937,7 +1062,7 @@ def cli():
     topic_mode.add_argument("--topic", help="Select an ID from topics.json")
     topic_mode.add_argument("--discover", action="store_true", help="Ask Gemini for a new sourced idea and storyboard")
     generate.add_argument("--count", type=int, choices=range(1, 12), default=1,
-                          help="With --discover, render a batch with distinct random lengths from 15 to 25 seconds")
+                          help="With --discover, render a batch of discovery Shorts with audio-driven lengths")
     generate.add_argument("--publish-both", action="store_true",
                           help="Publish new discovery drafts publicly on YouTube and Instagram")
     generate.add_argument("--gemini", action="store_true", help="Use an explicit free-tier key for a reviewed draft")
@@ -980,9 +1105,9 @@ def run_discover_batch(args, topics, current_trends):
     import instagram_publish as instagram
     from queue_publish import qa_gate
 
-    if args.count > 1 and args.seconds is not None:
-        raise ValueError("Omit --seconds for a batch so each draft can have a different length.")
-    durations = random.sample(range(15, 26), args.count) if args.count > 1 else [args.seconds or 15]
+    if args.seconds is not None and args.seconds not in DISCOVERY_DURATIONS:
+        raise ValueError(f"Discovery targets must be between {MIN_DURATION_SEC} and {MAX_DURATION_SEC} seconds.")
+    durations = [args.seconds] * args.count if args.seconds is not None else [None] * args.count
     titles = discovery_avoid_titles(topics)
     styles = list(DISCOVERY_TREATMENTS)
     random.shuffle(styles)
@@ -1006,7 +1131,8 @@ def run_discover_batch(args, topics, current_trends):
         })
 
     for index, seconds in enumerate(durations, 1):
-        print(f"Discovery draft {index}/{len(durations)} ({seconds}s)", flush=True)
+        label = f"{seconds}s target" if seconds is not None else "audio-driven"
+        print(f"Discovery draft {index}/{len(durations)} ({label})", flush=True)
         attempts = []
         entry = {
             "index": index,
@@ -1171,13 +1297,11 @@ def run(args):
         if args.publish_both and not args.discover:
             raise ValueError("--publish-both requires --discover.")
         if args.discover and args.seconds is not None and args.seconds not in DISCOVERY_DURATIONS:
-            raise ValueError("Discovery targets must be between 15 and 45 seconds.")
+            raise ValueError(f"Discovery targets must be between {MIN_DURATION_SEC} and {MAX_DURATION_SEC} seconds.")
         if args.discover:
             if args.gemini or args.shot_planner:
                 raise ValueError("--discover already creates the script and shots in one Gemini request.")
-            if args.count > 1 and args.seconds is not None:
-                raise ValueError("Omit --seconds for a batch so each draft can have a different length.")
-            durations = random.sample(range(15, 26), args.count) if args.count > 1 else [args.seconds or 15]
+            durations = [args.seconds] * args.count if args.seconds is not None else [None] * args.count
             titles = discovery_avoid_titles(topics)
             jobs = []
             styles = list(DISCOVERY_TREATMENTS)
@@ -1187,7 +1311,8 @@ def run(args):
                              "Earth science or weather", "art or design history", "everyday physics or engineering")
             request_log = []
             for index, seconds in enumerate(durations, 1):
-                print(f"Discovery draft {index}/{len(durations)} ({seconds}s)", flush=True)
+                label = f"{seconds}s target" if seconds is not None else "audio-driven"
+                print(f"Discovery draft {index}/{len(durations)} ({label})", flush=True)
                 attempts = []
                 try:
                     topic = discover_topic(seconds, current_trends(), titles,

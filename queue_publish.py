@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import shorts
-from storyboard import DURATIONS
+from storyboard import DURATIONS, MAX_DURATION_SEC, MIN_DURATION_SEC
 
 PROGRESS = shorts.ROOT / "pilot-progress.json"
 PREFIX = "queue-"
@@ -56,6 +56,10 @@ def inspect_draft(video, metadata):
         target = metadata.get("target_duration_seconds")
         if target and abs(actual - target) / target > .25:
             warnings.append(f"Exported runtime {actual:g}s differs from the {target:g}s target by more than 25%.")
+        if actual > MAX_DURATION_SEC:
+            warnings.append(f"Exported runtime {actual:g}s exceeds the {MAX_DURATION_SEC}s platform cap.")
+        elif actual < MIN_DURATION_SEC and str(metadata.get("topic_id", "")).startswith(("discovered-", "spark-")):
+            warnings.append(f"Exported runtime {actual:g}s is below the {MIN_DURATION_SEC}s minimum.")
     else:
         warnings.append("FFmpeg did not report the exported runtime.")
     loudness = re.findall(r"^\s*I:\s*(-?[\d.]+)\s+LUFS", report, re.MULTILINE)
@@ -85,6 +89,10 @@ def qa_gate(job):
     duration = qa.get("duration_seconds")
     if duration is None or duration <= 0:
         errors.append("FFmpeg did not measure a valid video duration.")
+    elif duration < MIN_DURATION_SEC or duration > MAX_DURATION_SEC:
+        errors.append(
+            f"Exported runtime {duration:g}s is outside the {MIN_DURATION_SEC}–{MAX_DURATION_SEC}s range."
+        )
     if qa.get("integrated_lufs") is None:
         errors.append("FFmpeg did not measure integrated audio loudness.")
     for warning in warnings:
