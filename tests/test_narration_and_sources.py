@@ -128,14 +128,15 @@ class SourcingTests(unittest.TestCase):
         video = {"kind": "video", "path": Path("waves.mp4"), "match_text": "ocean waves shoreline"}
         still = {"kind": "image", "path": Path("photo.jpg")}
         beats = [{"beat_id": index, "search_query": query}
-                 for index, query in enumerate(("ocean waves", "rip currents", "ocean shoreline", "ocean waves"))]
+                 for index, query in enumerate(("ocean waves", "rip currents", "ocean shoreline", "ocean waves", "ocean waves"))]
         beats[1]["fallback_video_query"] = "ocean waves"
-        planned = render.plan_video_windows({0: video, 1: still}, beats, lambda _: 12)
-        self.assertEqual([(planned[i]["window_start"], planned[i]["window_end"]) for i in range(3)],
-                         [(0, 4), (4, 8), (8, 12)])
-        self.assertEqual(planned[1]["fallback_asset"], still)
-        self.assertNotIn(3, planned)
-        short = render.plan_video_windows({0: video}, beats, lambda _: 10)
+        planned = render.plan_video_windows({0: video, 1: still}, beats, lambda _: 16)
+        self.assertEqual((planned[0]["window_start"], planned[0]["window_end"]), (0, 4))
+        self.assertEqual(planned[1], still)
+        self.assertNotIn(2, planned)
+        self.assertEqual((planned[3]["window_start"], planned[3]["window_end"]), (4, 8))
+        self.assertNotIn(4, planned)
+        short = render.plan_video_windows({0: video}, beats, lambda _: 8)
         self.assertEqual(set(short), {0})
 
     def test_archive_providers_request_video_only(self):

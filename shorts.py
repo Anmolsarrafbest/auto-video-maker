@@ -32,7 +32,7 @@ from production import (ATTRIBUTION, DISCOVERY_TREATMENTS, VOICE_CREDITS, VOICE_
 from render import OUTRO_SECONDS, encode, narration, spoken_plan
 from storyboard import (CLIPS, DIAGRAM_TEMPLATES, DISCOVERY_DURATIONS, DURATIONS, MAX_DURATION_SEC,
                         MIN_DURATION_SEC, VISUAL_TYPES, anchor_tokens, episode, find_anchor, flow_prompt,
-                        validate_diagram, validate_visual_beats, visual_beat_text)
+                        split_sparse_beats, validate_diagram, validate_visual_beats, visual_beat_text)
 from local_secrets import secret
 from youtube import has_token, read_json, read_token, save_json, sign_in, upload
 
@@ -77,6 +77,43 @@ def configure_console():
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def format_youtube_title(base_title, hashtags, max_len=100):
+    """Append 2-3 relevant hashtags to a YouTube title strictly within 100 chars without mid-word cuts."""
+    clean_title = " ".join(str(base_title or "").split())
+    existing = {tag.casefold() for tag in re.findall(r"#[\w]+", clean_title)}
+    candidates = []
+    seen = set(existing)
+    for raw in hashtags:
+        tag = "#" + re.sub(r"[^\w]", "", str(raw).lstrip("#"))
+        if len(tag) > 2 and tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            candidates.append(tag)
+        if len(candidates) >= 3:
+            break
+    if not candidates:
+        if len(clean_title) <= max_len:
+            return clean_title
+        trimmed = clean_title[:max_len].rsplit(" ", 1)[0].strip()
+        return trimmed or clean_title[:max_len]
+
+    min_tags = candidates[:min(2, len(candidates))]
+    min_suffix = " " + " ".join(min_tags)
+    title_budget = max_len - len(min_suffix)
+    if len(clean_title) > title_budget:
+        if title_budget <= 12:
+            min_tags = candidates[:1]
+            min_suffix = " " + min_tags[0]
+            title_budget = max(0, max_len - len(min_suffix))
+        shortened = clean_title[:title_budget].rsplit(" ", 1)[0].rstrip(",;:- ")
+        clean_title = shortened if len(shortened) >= 8 else clean_title[:title_budget].rstrip()
+
+    result = f"{clean_title}{min_suffix}".strip()
+    for extra in candidates[len(min_tags):]:
+        if len(result) + 1 + len(extra) <= max_len:
+            result = f"{result} {extra}"
+    return result
+
+
 def youtube_metadata(topic, trends=None, *, archive_used=False):
     is_science = topic["category"] in {"Space", "Ocean", "Physics"}
     category, related, hashtag = TOPIC_TAGS.get(
@@ -91,15 +128,27 @@ def youtube_metadata(topic, trends=None, *, archive_used=False):
     tags = {"#Shorts": None, hashtag: None}
     if is_science:
         tags["#ScienceShorts"] = None
+    discovery = topic.get("discovery") or {}
+    for raw_tag in discovery.get("instagram_tags", ()):
+        clean_tag = "#" + re.sub(r"[^\w]", "", str(raw_tag).lstrip("#"))
+        if len(clean_tag) > 2:
+            tags.setdefault(clean_tag, None)
+    for kw in discovery.get("subject_keywords", ()):
+        clean_kw = "#" + re.sub(r"[^\w]", "", str(kw).title())
+        if len(clean_kw) > 2:
+            tags.setdefault(clean_kw, None)
     for terms in (trends or {}).values():
         for term in terms:
             if term in aliases:
                 tags.setdefault("#" + term.title().replace(" ", ""), None)
+    desc_tags = list(tags)[:5]
+    raw_title = topic["beats"][0] if topic.get("format", "quiz") in {"quiz", "myth"} else topic["title"]
+    title_tags = ["#shorts", *(t for t in desc_tags if t.casefold() != "#shorts")]
     return {
-        "title": topic["beats"][0] if topic.get("format", "quiz") in {"quiz", "myth"} else topic["title"],
+        "title": format_youtube_title(raw_title, title_tags, max_len=100),
         "description": (
             f'{topic["beats"][1]}\n\n{source_label}: {topic["source"]}{image_credit}\n\n'
-            f'{voice_credit(direction["voice"])}\n\n{" ".join(tags)}'
+            f'{voice_credit(direction["voice"])}\n\n{" ".join(desc_tags)}'
         ),
         "tags": list(dict.fromkeys([*topic["aliases"], category, related,
                                    "science shorts" if is_science else "shorts"])),
@@ -380,11 +429,36 @@ def _normalize_search_query(raw_query, *fallback_texts):
     return " ".join(tokens)
 
 
-def normalize_discovery_beats(beats, title, category):
-    """Sanitize minor Gemini beat formatting drift before strict storyboard validation."""
+GENERIC_QUERY_WORDS = {
+    "eye", "eyes", "vision", "power", "energy", "light", "water", "time", "world",
+    "nature", "science", "life", "body", "earth", "space", "speed", "sound", "heat", "cold",
+}
+
+
+def _anchor_query_to_subject(query, subject_words, *, max_words=4):
+    tokens = [tok for tok in re.findall(r"[\w'-]+", str(query or "")) if re.search(r"\w", tok)]
+    subject_tokens = [tok for tok in subject_words if re.search(r"\w", tok)]
+    subject_set = {tok.casefold() for tok in subject_tokens}
+    if subject_tokens:
+        query_set = {tok.casefold() for tok in tokens}
+        has_subject = bool(query_set & subject_set)
+        only_generic = all(tok.casefold() in GENERIC_QUERY_WORDS for tok in tokens)
+        if not has_subject or only_generic:
+            tokens = [subject_tokens[0], *[t for t in tokens if t.casefold() != subject_tokens[0].casefold()]]
+    return " ".join(tokens[:max_words])
+
+
+def normalize_discovery_beats(beats, title, category, subject_keywords=()):
+    """Sanitize minor Gemini beat formatting drift and anchor queries to subject_keywords."""
     if not isinstance(beats, list):
         return beats
-    fallback_keywords = " ".join(visuals.keywords(title) or [title])
+    subject_words = [
+        tok for kw in subject_keywords
+        for tok in re.findall(r"[\w'-]+", str(kw)) if re.search(r"\w", tok)
+    ]
+    if not subject_words:
+        subject_words = visuals.keywords(title)[:3]
+    fallback_keywords = " ".join(subject_words or visuals.keywords(title) or [title])
     category_keywords = " ".join(visuals.keywords(category) or [category])
     normalized = []
     for beat in beats:
@@ -393,16 +467,21 @@ def normalize_discovery_beats(beats, title, category):
             continue
         item = dict(beat)
         anchor = str(item.get("anchor_text") or "")
-        item["search_query"] = _normalize_search_query(
+        cleaned_query = _normalize_search_query(
             item.get("search_query"),
             fallback_keywords,
             " ".join(visuals.keywords(anchor) or [anchor]),
             category_keywords,
         )
+        item["search_query"] = _anchor_query_to_subject(cleaned_query, subject_words, max_words=4)
         if "fallback_video_query" in item:
-            fallback = " ".join(visuals.keywords(str(item["fallback_video_query"] or ""))[:2])
+            fallback = _anchor_query_to_subject(
+                " ".join(visuals.keywords(str(item["fallback_video_query"] or ""))[:2]),
+                subject_words,
+                max_words=2,
+            )
             if fallback:
-                item["fallback_video_query"] = fallback
+                item["fallback_video_query"] = fallback[:48]
             else:
                 item.pop("fallback_video_query")
         if "callout_stat" in item:
@@ -499,7 +578,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
     fields = ("title", "category", "hook", "explanation", "opening_label", "payoff_label",
               "source", "trend", "instagram_tags")
     minimum_beats = 5 if (seconds is not None and seconds >= 30) else 2
-    beat_target = "five to eight" if (seconds is not None and seconds >= 30) else "four to eight"
+    beat_target = "six to ten" if (seconds is None or seconds >= 25) else "four to eight"
     reserved = 0 if loop else OUTRO_SECONDS
     context = {"trends": {region: titles[:12] for region, titles in trends.items()},
                "avoid_repeating": previous_titles[:80]}
@@ -539,10 +618,13 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         f"{ending_instruction}"
         "Use the time for a concrete detail or example supported by the source. Avoid filler or repeating the hook. "
         "Use simple spoken punctuation and spell out numbers. Supply two short labels (each <= 38 characters). "
-        f"Return a beats array with {minimum_beats} to 8 visual beats in narration order, targeting {beat_target}. "
+        f"Return a beats array with {minimum_beats} to 10 visual beats in narration order, targeting {beat_target} distinct beats (never holding a single beat longer than 5.5 seconds). "
         "Beat IDs start at zero and increase by one. Copy each anchor_text verbatim from the hook or "
         "explanation using 2–5 consecutive spoken words. Anchor Beat 0 to the opening words and supply its callout_stat. "
         "Give each explanation step a separate beat so it has its own visual. "
+        "Also return subject_keywords: 1 to 3 core concrete nouns naming the video's main subject "
+        "(for example ['sloth', 'rainforest'] or ['seismic', 'earthquake']). "
+        "Anchor every beat's search_query and fallback_video_query directly to the main subject—never output bare generic words like 'eye', 'vision', or 'power' without the subject noun. "
         "Choose visual_type from archival, stock_video, diagram, callout_card. "
         "Make at least 75 percent of beats archival or stock_video, preferably 80 percent or more. "
         "Use at most one or two diagram or callout_card beats for ideas footage cannot show well. "
@@ -578,7 +660,8 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                       "type": "OBJECT", "properties": {
                           **{name: {"type": "STRING"} for name in (*fields, "icon_query", "event_media_url", "event_year")},
                           "real_event": {"type": "BOOLEAN"},
-                          "beats": {"type": "ARRAY", "minItems": minimum_beats, "maxItems": 8,
+                          "subject_keywords": {"type": "ARRAY", "minItems": 1, "maxItems": 3, "items": {"type": "STRING"}},
+                          "beats": {"type": "ARRAY", "minItems": minimum_beats, "maxItems": 12,
                                     "items": {"type": "OBJECT", "properties": {
                                         "beat_id": {"type": "INTEGER"},
                                         "anchor_text": {"type": "STRING"},
@@ -596,7 +679,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                                                           "required": ["label"]}}},
                                             "required": ["template", "items"]}},
                                         "required": ["beat_id", "anchor_text", "visual_type", "search_query"]}}},
-                      "required": [*fields, "beats", "icon_query", "real_event", "event_media_url", "event_year"]}}}
+                                      "required": [*fields, "beats", "icon_query", "real_event", "event_media_url", "event_year", "subject_keywords"]}}}
         if requests_sent is not None:
             requests_sent.append(request_body)
         response, active_model = call_gemini(key, request_body, hq_script=hq_script, timeout=40)
@@ -645,8 +728,13 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                 result["explanation"] = trimmed_expl
                 script_warnings.append(trim_warn)
                 print(trim_warn, file=sys.stderr)
+            raw_subject = model_output.get("subject_keywords")
+            subject_keywords = [
+                str(s).strip() for s in (raw_subject if isinstance(raw_subject, list) else ())
+                if str(s).strip()
+            ][:3] or visuals.keywords(result["title"])[:3]
             normalized_beats = normalize_discovery_beats(
-                raw_beats, result["title"], result["category"],
+                raw_beats, result["title"], result["category"], subject_keywords=subject_keywords,
             )
             try:
                 visual_beats = validate_visual_beats(normalized_beats,
@@ -656,6 +744,12 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                     raise
                 correction = f"\nReturn the entire plan again and correct the visual beats. {error}"
                 continue
+            visual_beats = split_sparse_beats(
+                visual_beats,
+                [result["hook"], result["explanation"]],
+                est_seconds,
+                subject_keywords=subject_keywords,
+            )
             break
     for label_field in ("opening_label", "payoff_label"):
         result[label_field] = _fit_line(result[label_field], 38)
@@ -699,6 +793,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
             **({"script_warnings": script_warnings} if script_warnings else {}),
             "gemini_exchange": {"model": active_model, "request": request_body, "response": model_output},
             "discovery": {"trend": matched_trend, "instagram_tags": re.findall(r"#[\w]{2,45}\b", result["instagram_tags"])[:4],
+                          "subject_keywords": subject_keywords,
                           "beats": visual_beats, "icon_query": icon, "real_event": archival,
                           "event_year": year, **media}}
 

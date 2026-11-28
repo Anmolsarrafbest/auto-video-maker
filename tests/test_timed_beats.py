@@ -165,7 +165,8 @@ class TimedBeatsTests(unittest.TestCase):
         with patch("render.FPS", 1):
             images = list(frames(topic, beats, timings, 6, visual_timeline=timeline,
                                  storyboard={0: photo}, load_visual=lambda _: photo))
-        self.assertEqual([item["rendered_as"] for item in timeline], ["image", "reframe", "callout_card"])
+        self.assertEqual([item["rendered_as"] for item in timeline], ["image", "callout_card", "callout_card"])
+        self.assertTrue(timeline[0]["full_bleed"])
         self.assertNotEqual(images[1].tobytes(), images[5].tobytes())
         self.assertNotEqual(images[0].getpixel((900, 1)), images[-1].getpixel((900, 1)))
 

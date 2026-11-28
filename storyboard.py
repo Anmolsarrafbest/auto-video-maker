@@ -12,6 +12,7 @@ DISCOVERY_DURATIONS = range(MIN_DURATION_SEC, MAX_DURATION_SEC + 1)
 VISUAL_TYPES = ("archival", "stock_video", "diagram", "callout_card")
 DIAGRAM_TEMPLATES = ("timeline", "comparison", "process")
 MAX_VISUAL_SECONDS = 4.5
+MAX_BEAT_SECONDS = 5.5
 CLIPS = {
     "wright-first-flight": {
         "file": "wright-onboard-italy-1909.ogv",
@@ -106,8 +107,8 @@ def validate_diagram(data):
 
 def validate_visual_beats(beats, narration, seconds=None):
     minimum = 5 if (seconds is not None and seconds >= 30) else 2
-    if not isinstance(beats, list) or not minimum <= len(beats) <= 8:
-        raise ValueError(f"Supply {minimum} to 8 visual beats.")
+    if not isinstance(beats, list) or not minimum <= len(beats) <= 12:
+        raise ValueError(f"Supply {minimum} to 12 visual beats.")
     words = anchor_tokens(" ".join(narration))
     cursor = 0
     cleaned = []
@@ -158,6 +159,68 @@ def visual_beat_text(beats):
             yield diagram["title"]
             yield diagram["unit"]
             yield from (item["label"] for item in diagram["items"])
+
+
+def split_sparse_beats(beats, narration_lines, estimated_seconds, *, max_beat_seconds=MAX_BEAT_SECONDS,
+                       subject_keywords=()):
+    """Split beats whose estimated span exceeds max_beat_seconds into distinct sub-beats."""
+    if not beats or estimated_seconds <= max_beat_seconds:
+        return beats
+    raw_words = [w for line in narration_lines for w in str(line).split() if re.search(r"\w", w)]
+    norm_tokens = [re.sub(r"[^\w]", "", w.casefold()) for w in raw_words]
+    if len(norm_tokens) < 4:
+        return beats
+    positions = []
+    cursor = 0
+    for beat in beats:
+        anchor = anchor_tokens(beat.get("anchor_text", ""))
+        found = find_anchor(norm_tokens, anchor, cursor) if anchor else None
+        if found is None:
+            return beats
+        positions.append(found)
+        cursor = found + 1
+
+    subject_clean = [re.sub(r"[^\w'-]", "", kw) for kw in subject_keywords if re.search(r"\w", str(kw))]
+    stop = {"a", "an", "and", "are", "as", "at", "by", "for", "from", "has", "have", "in", "into",
+            "is", "it", "its", "of", "on", "or", "that", "the", "their", "this", "to", "was", "with"}
+    result = []
+    total_tokens = len(raw_words)
+    for idx, beat in enumerate(beats):
+        result.append(dict(beat))
+        start_tok = positions[idx] if idx > 0 else 0
+        end_tok = positions[idx + 1] if idx + 1 < len(positions) else total_tokens
+        span_seconds = estimated_seconds * max(0, end_tok - start_tok) / max(1, total_tokens)
+        if span_seconds <= max_beat_seconds or end_tok - start_tok < 4:
+            continue
+        chunks = math.ceil(span_seconds / max_beat_seconds)
+        step = (end_tok - start_tok) / chunks
+        for sub in range(1, chunks):
+            if len(result) >= 12:
+                break
+            mid = round(start_tok + sub * step)
+            if mid <= start_tok or mid + 2 > end_tok:
+                continue
+            anchor_slice = [re.sub(r"[^\w'-]", "", w) for w in raw_words[mid:mid + 3]]
+            anchor_slice = [w for w in anchor_slice if re.search(r"\w", w)]
+            if len(anchor_slice) < 2:
+                continue
+            local_words = [
+                re.sub(r"[^\w'-]", "", w).casefold()
+                for w in raw_words[mid:min(end_tok, mid + 8)]
+            ]
+            content = [w for w in local_words if len(w) > 2 and w not in stop]
+            query_words = list(dict.fromkeys([*subject_clean[:1], *content[:2], *subject_clean[1:2]]))[:4]
+            if len(query_words) < 2:
+                query_words = (query_words + anchor_slice)[:2]
+            result.append({
+                "beat_id": len(result),
+                "anchor_text": " ".join(anchor_slice),
+                "visual_type": "stock_video",
+                "search_query": " ".join(query_words[:4]),
+            })
+    for new_id, beat in enumerate(result):
+        beat["beat_id"] = new_id
+    return result
 
 
 def resolve_visual_timeline(topic, word_lines, plan, timings, seconds):

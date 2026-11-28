@@ -52,14 +52,24 @@ def video_duration(ffmpeg, path):
     return 3600 * hours + 60 * minutes + seconds
 
 
-def decode_frames(ffmpeg, path, fps, *, portrait=False, offset=0, duration=4):
-    width, height = (720, 1280) if portrait else (1080, 608)
+def decode_frames(ffmpeg, path, fps, *, portrait=False, full_bleed=False, offset=0, duration=4):
+    if full_bleed:
+        width, height = 1080, 1920
+        scale_filter = (
+            f"fps={fps},scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920"
+        )
+    else:
+        width, height = (720, 1280) if portrait else (1080, 608)
+        scale_filter = (
+            f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+        )
     stride = width * height * 3
     frames = []
     with subprocess.Popen(
         [ffmpeg, "-v", "error", "-ss", str(offset), "-i", str(path), "-t", str(duration),
-         "-vf", f"fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+         "-vf", scale_filter,
          "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         stdout=subprocess.PIPE,
     ) as process:

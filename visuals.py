@@ -34,6 +34,16 @@ COMMONS_INFO = {"action": "query", "prop": "imageinfo", "format": "json", "forma
                 "iiprop": "url|mime|size|extmetadata",
                 "iiextmetadatafilter": "Artist|LicenseShortName|LicenseUrl|Restrictions|ImageDescription|DateTimeOriginal"}
 SHOT_ROLES = ("hook", "explanation", "payoff")
+HUMAN_OFFTOPIC_TERMS = {
+    "face", "faces", "portrait", "portraits", "eye", "eyes", "iris", "pupil",
+    "person", "people", "woman", "women", "man", "men", "girl", "boy",
+    "selfie", "model", "human", "humans", "smile", "smiling", "headshot",
+}
+HUMAN_TOPIC_TERMS = {
+    "human", "humans", "person", "people", "brain", "eye", "eyes", "athlete",
+    "astronaut", "scientist", "inventor", "pilot", "doctor", "history", "soldier",
+    "artist", "historian", "writer", "wright", "katherine", "johnson",
+}
 QUERY_STOP = set(("a an and are as at by did does for from has how in into is of on or that the "
                   "their this through to was what when where which why with its it end keep held "
                   "more most very just like side each both than then over also only still here there "
@@ -119,13 +129,16 @@ def normalize_query(query):
     return " ".join(query.strip().casefold().split())
 
 
-def pixabay_cache_path(query, media_type):
-    digest = hashlib.sha256(json.dumps([normalize_query(query), media_type]).encode()).hexdigest()
+def pixabay_cache_path(query, media_type, orientation=""):
+    key_parts = [normalize_query(query), media_type]
+    if orientation:
+        key_parts.append(orientation)
+    digest = hashlib.sha256(json.dumps(key_parts).encode()).hexdigest()
     return PIXABAY_CACHE / f"{media_type}-{digest}.json"
 
 
 def pixabay_get(endpoint, params, media_type):
-    path = pixabay_cache_path(params["q"], media_type)
+    path = pixabay_cache_path(params["q"], media_type, params.get("orientation", ""))
     if path.is_file() and time.time() - path.stat().st_mtime < 86400:
         return json.loads(path.read_text(encoding="utf-8"))
     response, _ = rate_limiter.request_with_backoff(
@@ -216,10 +229,49 @@ def internet_archive_candidates(query):
                    "url": f'https://archive.org/download/{identifier}/{quote(file["name"], safe="")}'}
 
 
+def loc_candidates(query, media_type=None):
+    """Search public-domain Library of Congress collections for archival video or images."""
+    target_format = "video" if media_type == "video" else "image"
+    data = stock_get(
+        "https://www.loc.gov/search/",
+        {"q": query, "fo": "json", "c": 8, "fa": f"online-format:{target_format}"},
+        headers=COMMONS_HEADERS,
+        provider="loc",
+    )
+    for item in data.get("results", []):
+        item_url = str(item.get("id") or item.get("url") or "")
+        if not item_url.startswith("https://"):
+            continue
+        resources = [str(u) for u in (item.get("image_url") or []) if isinstance(u, str) and u.startswith("https://")]
+        for res in item.get("resources") or []:
+            if isinstance(res, dict):
+                for field in ("video", "url", "image"):
+                    val = res.get(field)
+                    if isinstance(val, str) and val.startswith("https://"):
+                        resources.append(val)
+        exts = (".mp4", ".mov", ".webm") if target_format == "video" else (".jpg", ".jpeg", ".png")
+        asset_url = next((u for u in resources if urlparse(u).path.lower().endswith(exts)), "")
+        if not asset_url:
+            continue
+        yield {
+            "id": hashlib.sha256(asset_url.encode()).hexdigest()[:12],
+            "kind": target_format,
+            "provider": "loc",
+            "title": str(item.get("title") or "Library of Congress archive"),
+            "keywords": " ".join(str(s) for s in (item.get("subject") or [])),
+            "source": item_url,
+            "credit": "Library of Congress · Public domain",
+            "url": asset_url,
+        }
+
+
 def candidates(query, provider, *, media_type=None):
     if media_type is None:
         yield from candidates(query, provider, media_type="video")
         yield from candidates(query, provider, media_type="image")
+        return
+    if provider == "loc":
+        yield from loc_candidates(query, media_type=media_type)
         return
     if provider in {"coverr", "internet_archive"}:
         if media_type != "image":
@@ -284,14 +336,28 @@ def candidates(query, provider, *, media_type=None):
     for kind, endpoint in (("video", "videos/"), ("image", "")):
         if media_type and media_type != kind:
             continue
-        params = {"key": key, "q": query[:100], "per_page": 8, "safesearch": "true"}
+        base_params = {"key": key, "q": query[:100], "per_page": 8, "safesearch": "true"}
         if kind == "image":
-            params.update(image_type="photo", min_width=640)
-        try:
-            hits = pixabay_get(endpoint, params, kind)["hits"]
-        except (requests.RequestException, OSError, ValueError, KeyError):
-            print(f"pixabay: {kind} search unavailable.", file=sys.stderr)
-            continue
+            param_sets = [
+                {**base_params, "image_type": "photo", "min_width": 640, "orientation": "vertical"},
+                {**base_params, "image_type": "photo", "min_width": 640},
+            ]
+        else:
+            param_sets = [base_params]
+        seen_hits = set()
+        hits = []
+        for idx, params in enumerate(param_sets):
+            if idx > 0 and len(hits) >= 4:
+                break
+            try:
+                batch_hits = pixabay_get(endpoint, params, kind)["hits"]
+            except (requests.RequestException, OSError, ValueError, KeyError):
+                print(f"pixabay: {kind} search unavailable.", file=sys.stderr)
+                continue
+            for item in batch_hits:
+                if item["id"] not in seen_hits:
+                    seen_hits.add(item["id"])
+                    hits.append(item)
         for item in hits:
             if kind == "video":
                 files = [file for file in item["videos"].values()
@@ -299,8 +365,11 @@ def candidates(query, provider, *, media_type=None):
                          and 0 < file["size"] <= LIMIT]
                 if not files:
                     continue
-                file = min(files, key=lambda entry: (min(entry["width"], entry["height"]) < 720,
-                                                     abs(min(entry["width"], entry["height"]) - 1080)))
+                file = min(files, key=lambda entry: (
+                    entry["width"] >= entry["height"],
+                    min(entry["width"], entry["height"]) < 720,
+                    abs(min(entry["width"], entry["height"]) - 1080),
+                ))
                 url, width, height = file["url"], file["width"], file["height"]
             else:
                 url = item["largeImageURL"]
@@ -392,10 +461,25 @@ def matches_event_year(match, year):
     return year in dates if dates else bool(re.search(rf"\b{re.escape(year)}\b", match["title"]))
 
 
-def ranked_matches(query, providers, *, strict=False, event_year="", media_type=None):
+def is_off_topic(match, subject_keywords=(), *, title="", category=""):
+    """Reject candidates lacking subject_keywords overlap or showing human faces on non-human topics."""
+    candidate_words = set(keywords(f"{match.get('title', '')} {match.get('keywords', '')}"))
+    subject_terms = set(keywords(" ".join(subject_keywords)))
+    topic_context = set(keywords(f"{title} {category}")) | subject_terms
+    if (candidate_words & HUMAN_OFFTOPIC_TERMS) and not (topic_context & HUMAN_TOPIC_TERMS):
+        if not subject_terms or not (candidate_words & subject_terms):
+            return True
+    if subject_terms and not (candidate_words & subject_terms):
+        return True
+    return False
+
+
+def ranked_matches(query, providers, *, strict=False, event_year="", media_type=None,
+                   subject_keywords=(), title="", category=""):
     terms = set(keywords(query))
     if event_year:
         terms.discard(event_year)
+    subject_terms = set(keywords(" ".join(subject_keywords)))
     ranked = []
     for provider in providers:
         try:
@@ -406,20 +490,24 @@ def ranked_matches(query, providers, *, strict=False, event_year="", media_type=
         for match in matches:
             if media_type and match["kind"] != media_type:
                 continue
+            if is_off_topic(match, subject_keywords, title=title, category=category):
+                continue
             words = set(keywords(match["title"] + " " + match.get("keywords", "")))
             overlap = len(terms & words)
+            subject_overlap = len(subject_terms & words) if subject_terms else 0
             if overlap < min(len(terms), 3 if event_year else 2 if strict else 1):
                 continue
             if event_year and not matches_event_year(match, event_year):
                 continue
             width, height = match.get("width", 0), match.get("height", 0)
             portrait_hd = width >= 720 and height >= 1280 and width < height
-            shape = 2 if portrait_hd else 1 if not width else 0
+            portrait = width > 0 and height > width
+            shape = 3 if portrait_hd else 2 if portrait else 1 if not width else 0
             closeness = -abs(width / height - 9 / 16) if height else -1
             video = match["kind"] == "video"
-            vertical_video = video and portrait_hd
+            vertical_video = video and portrait
             near_target = video and 0 < width < height and closeness >= -.025
-            ranked.append(((video, near_target, vertical_video, overlap, shape, closeness, min(width, 2160)), match))
+            ranked.append(((video, near_target, vertical_video, subject_overlap, overlap, shape, closeness, min(width, 2160)), match))
     return [match for _, match in sorted(ranked, key=lambda item: item[0], reverse=True)]
 
 
@@ -628,11 +716,51 @@ def select_relevant_candidates(topic, beats_by_id, candidate_pools, *, requests_
         return {beat_id: 0 for beat_id in candidate_pools}
 
 
+def load_broll_candidates(query="", subject_keywords=()):
+    """Load unused local evergreen B-roll entries from broll_manifest.json if present."""
+    manifest_path = next(
+        (p for p in (Path(__file__).resolve().parent / "broll_manifest.json", CACHE / "broll_manifest.json")
+         if p.is_file()),
+        None,
+    )
+    if manifest_path is None:
+        return []
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    entries = raw.get("clips", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+    terms = set(keywords(query)) | set(keywords(" ".join(subject_keywords)))
+    scored = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("file"):
+            continue
+        file_path = CACHE / Path(entry["file"]).name
+        if not file_path.is_file():
+            continue
+        tags = set(keywords(f"{entry.get('title', '')} {' '.join(entry.get('tags', ()))}"))
+        if subject_keywords and not (set(keywords(" ".join(subject_keywords))) & tags):
+            continue
+        overlap = len(terms & tags) if terms else 0
+        scored.append((overlap, {
+            "file": file_path.name,
+            "kind": entry.get("kind", "video"),
+            "source": entry.get("source") or f"broll:{file_path.name}",
+            "credit": entry.get("credit") or "Evergreen B-roll archive",
+            "synthetic": False,
+            "automatic": True,
+            "match_text": f"{entry.get('title', '')} {' '.join(entry.get('tags', ()))}",
+        }))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [item for _, item in scored]
+
+
 def cache_storyboard(topic, *, requests_sent=None):
-    """Prepare video candidates before considering photos for each footage beat."""
+    """Build a multi-asset pool (videos + distinct photos + B-roll) with strict reuse caps."""
     topic_id = topic["id"]
     discovery = topic["discovery"]
     specs = discovery.get("beats")
+    subject_keywords = tuple(discovery.get("subject_keywords") or keywords(topic["title"])[:3])
     if specs:
         fields = {"icon_query": discovery.get("icon_query", "")}
     elif "shot_queries" in discovery and "icon_query" in discovery:
@@ -664,7 +792,7 @@ def cache_storyboard(topic, *, requests_sent=None):
         stock.append("pexels")
     if secret("COVERR_API_KEY"):
         stock.append("coverr")
-    archives = ["wikimedia", "internet_archive"]
+    archives = ["wikimedia", "internet_archive", "loc"]
     if re.search(r"\b(space|planet|moon|orbit|nasa|astronom\w*|mars|earth|solar|star\w*)\b",
                  topic["category"] + " " + topic["title"], re.I):
         archives.insert(0, "nasa")
@@ -674,8 +802,10 @@ def cache_storyboard(topic, *, requests_sent=None):
     def lookup(search_text, providers, required_year, media_type):
         key = (normalize_query(search_text), tuple(providers), required_year, media_type)
         if key not in query_cache:
-            query_cache[key] = ranked_matches(search_text, providers, strict=True,
-                                               event_year=required_year, media_type=media_type)
+            query_cache[key] = ranked_matches(
+                search_text, providers, strict=True, event_year=required_year, media_type=media_type,
+                subject_keywords=subject_keywords, title=topic["title"], category=topic["category"],
+            )
         return query_cache[key]
 
     def search(query, media_type, *, broad=False):
@@ -702,32 +832,63 @@ def cache_storyboard(topic, *, requests_sent=None):
         if not matches and fallback and normalize_query(fallback) != normalize_query(query):
             matches = search(fallback, "video", broad=True)
         if matches:
-            candidate_pools[index] = matches[:3]
+            candidate_pools[index] = matches[:5]
 
     selections = select_relevant_candidates(topic, beats_by_id, candidate_pools, requests_sent=requests_sent)
-    used = {record["source"] for record in shots.values()}
-    used_files = {record["file"] for record in shots.values()}
+    used_sources = set()
+    used_files = set()
+    video_counts = {}
+    last_video_pos = {}
+    for pos, beat in enumerate(requests_by_beat):
+        rec = shots.get(beat["beat_id"])
+        if not rec:
+            continue
+        used_sources.add(rec["source"])
+        used_files.add(rec["file"])
+        if rec.get("kind") == "video":
+            video_counts[rec["source"]] = video_counts.get(rec["source"], 0) + 1
+            last_video_pos[rec["source"]] = pos
 
-    def store_match(index, matches):
-        for match in islice(matches, 6):
-            if match["source"] in used:
+    def can_use_asset(source, kind, beat_pos, *, allow_second_video=False):
+        if kind == "video":
+            count = video_counts.get(source, 0)
+            if count == 0:
+                return True
+            if not allow_second_video or count >= 2:
+                return False
+            prev = last_video_pos.get(source)
+            return prev is None or beat_pos - prev >= 3
+        return source not in used_sources
+
+    def store_match(index, matches, beat_pos, *, allow_second_video=False):
+        for match in islice(matches, 8):
+            source = match.get("source", "")
+            kind = match.get("kind", "image")
+            if not can_use_asset(source, kind, beat_pos, allow_second_video=allow_second_video):
                 continue
             try:
                 asset = cache(topic_id, dict(match, automatic=True))
             except (requests.RequestException, OSError, ValueError):
                 continue
-            if asset["file"] in used_files:
+            if kind != "video" and asset["file"] in used_files:
+                continue
+            if kind == "video" and not allow_second_video and asset["file"] in used_files:
                 continue
             if match.get("illustrative"):
                 asset["context_label"] = "ILLUSTRATIVE STOCK"
             shots[index] = asset
-            used.add(asset["source"])
+            used_sources.add(asset["source"])
             used_files.add(asset["file"])
-            return
+            if asset["kind"] == "video":
+                video_counts[asset["source"]] = video_counts.get(asset["source"], 0) + 1
+                last_video_pos[asset["source"]] = beat_pos
+            return True
+        return False
 
-    for beat in requests_by_beat:
+    # Pass 1: assign unique unused videos (plus fallback broad video queries) first.
+    for beat_pos, beat in enumerate(requests_by_beat):
         index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
-        if shots.get(index, {}).get("kind") == "video" or not query or visual_type == "callout_card":
+        if index in shots or not query or visual_type == "callout_card":
             continue
         if visual_type == "diagram" and beat.get("diagram") and has_manim:
             continue
@@ -735,12 +896,41 @@ def cache_storyboard(topic, *, requests_sent=None):
         if index in candidate_pools and choice >= 0:
             pool = candidate_pools[index]
             ordered = [pool[choice]] + [item for i, item in enumerate(pool) if i != choice]
-            store_match(index, ordered)
+            store_match(index, ordered, beat_pos)
             fallback = beat.get("fallback_video_query")
             if shots.get(index, {}).get("kind") != "video" and fallback and normalize_query(fallback) != normalize_query(query):
-                store_match(index, search(fallback, "video", broad=True))
-        if index not in shots:
-            store_match(index, search(query, "image"))
+                store_match(index, search(fallback, "video", broad=True), beat_pos)
+
+    # Pass 2: fill remaining beats with distinct subject-relevant photos (max 1 use per image).
+    extra_topic_photos = None
+    subject_photo_query = " ".join(subject_keywords[:2] or keywords(topic["title"])[:2])
+    for beat_pos, beat in enumerate(requests_by_beat):
+        index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
+        if index in shots or not query or visual_type == "callout_card":
+            continue
+        if visual_type == "diagram" and beat.get("diagram") and has_manim:
+            continue
+        if not store_match(index, search(query, "image"), beat_pos):
+            if subject_photo_query and normalize_query(subject_photo_query) != normalize_query(query):
+                if extra_topic_photos is None:
+                    extra_topic_photos = search(subject_photo_query, "image", broad=True)
+                store_match(index, extra_topic_photos, beat_pos)
+
+    # Pass 3: broll_manifest.json or non-consecutive 2nd video reuse (max 2 total, >=2 beats apart) or AI fallback.
+    for beat_pos, beat in enumerate(requests_by_beat):
+        index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
+        if index in shots or not query or visual_type == "callout_card":
+            continue
+        if visual_type == "diagram" and beat.get("diagram") and has_manim:
+            continue
+        for broll in load_broll_candidates(query, subject_keywords):
+            if can_use_asset(broll["source"], broll["kind"], beat_pos) and broll["file"] not in used_files:
+                shots[index] = broll
+                used_sources.add(broll["source"])
+                used_files.add(broll["file"])
+                break
+        if index not in shots and index in candidate_pools and selections.get(index, -1) >= 0:
+            store_match(index, candidate_pools[index], beat_pos, allow_second_video=True)
         if index not in shots and secret("POLLINATIONS_ZERO_COST_MODEL").strip():
             try:
                 asset = cache(topic_id, dict(illustration_request(query), automatic=True))

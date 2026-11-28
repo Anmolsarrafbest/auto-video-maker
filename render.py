@@ -169,10 +169,11 @@ class SupersampledShapes:
         self.draw.line(self.points(points), fill, width * self.scale, joint="curve")
 
 
-def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0):
+def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0, zoom_in=True):
     motion = ease_cubic(time / max(.1, duration))
+    zoom_progress = motion if zoom_in else 1.0 - motion
     aspect = size[0] / size[1]
-    width = min(image.width, image.height * aspect) / (1 + .16 * bool(reframe) + zoom * motion)
+    width = min(image.width, image.height * aspect) / (1 + .16 * bool(reframe) + zoom * zoom_progress)
     height = width / aspect
     x = (image.width - width) * (.65 - .3 * motion if reframe % 2 else .35 + .3 * motion)
     y = (image.height - height) * (.58 if reframe % 2 else .42)
@@ -183,8 +184,14 @@ def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0):
 @lru_cache(maxsize=4)
 def visual_shade(size):
     mask = Image.new("L", (1, size[1]))
-    mask.putdata([round(72 * max(0, (row / max(1, size[1] - 1) - .55) / .45) ** 2)
-                  for row in range(size[1])])
+    height = max(1, size[1] - 1)
+    values = []
+    for row in range(size[1]):
+        frac = row / height
+        top_vignette = round(68 * max(0.0, (.18 - frac) / .18) ** 1.6)
+        bottom_vignette = round(92 * max(0.0, (frac - .52) / .48) ** 1.8)
+        values.append(min(255, max(top_vignette, bottom_vignette)))
+    mask.putdata(values)
     return mask.resize(size)
 
 
@@ -230,11 +237,13 @@ class NativeOverlay:
                           width=round(width * OUTPUT_SIZE[0] / WIDTH))
 
 
-def place_visual(shot, position, time, *, portrait=False):
+def place_visual(shot, position, time, *, portrait=False, full_bleed=False):
     opening_scale = ease_cubic(time / .075) if time < .075 else 1 - ease_cubic((time - .075) / .225)
     punch = .09 * opening_scale
-    if portrait:
-        img = camera_shot(shot, OUTPUT_SIZE, 1, 1, zoom=punch) if punch else shot
+    if portrait or full_bleed:
+        if shot.size != OUTPUT_SIZE:
+            shot = ImageOps.fit(shot, OUTPUT_SIZE, Image.Resampling.LANCZOS)
+        img = camera_shot(shot, OUTPUT_SIZE, 1, 1, zoom=punch) if punch else shot.copy()
         img.paste((8, 12, 23), (0, 0, *OUTPUT_SIZE), visual_shade(OUTPUT_SIZE))
         return img
     small = ImageOps.fit(shot, (270, 480), Image.Resampling.BILINEAR)
@@ -509,11 +518,18 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
     starting_style = card_styles.index(discovery_style) if discovery_style in card_styles else 0
     previous_photos, labels = [], []
     previous_photo = None
+    photo_toggle = {}
+    photo_count = 0
+    seen_photo_beats = set()
     for segment in visual_timeline:
         key = segment["beat_id"]
         previous_photos.append(previous_photo)
         if storyboard.get(key, {}).get("kind") == "image":
             previous_photo = key
+            if key not in seen_photo_beats:
+                seen_photo_beats.add(key)
+                photo_toggle[key] = (photo_count % 2 == 0)
+                photo_count += 1
         labels.append(segment.get("callout_stat") or segment.get("search_query")
                       or " ".join(segment["anchor_text"].split()[:5]))
 
@@ -537,31 +553,22 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         if use_diagram:
             sequence, portrait, classification = diagram_frames, False, "diagram"
         elif not record:
-            reused = previous_photos[slot]
             same_label = slot and labels[slot].casefold() == labels[slot - 1].casefold()
-            if reused is not None and same_label:
-                record = load_visual(reused)
-                classification = "reframe" if record else ""
-            if not record:
-                if icon and credit_icon:
-                    credit_icon()
-                style = card_styles[(starting_style + slot) % len(card_styles)]
-                label = labels[slot]
-                if same_label and not segment.get("callout_stat"):
-                    label = " ".join(segment["anchor_text"].split()[:5])
-                segment["rendered_as"] = "callout_card"
-                return discovery_canvas(style, base, accent, time, label, elapsed, icon), None
-            sequence, portrait = record["images"], record["portrait"]
+            if icon and credit_icon:
+                credit_icon()
+            style = card_styles[(starting_style + slot) % len(card_styles)]
+            label = labels[slot]
+            if same_label and not segment.get("callout_stat"):
+                label = " ".join(segment["anchor_text"].split()[:5])
+            segment["rendered_as"] = "callout_card"
+            return discovery_canvas(style, base, accent, time, label, elapsed, icon), None
         else:
             sequence, portrait = record["images"], record["portrait"]
         segment["rendered_as"] = classification
         if classification == "video" and "window_end" in record:
             segment["source_start_time"] = record["window_start"]
             segment["source_end_time"] = record["window_end"]
-        prior_id = previous_photos[slot]
-        prior_file = storyboard.get(prior_id, {}).get("path")
-        repeated_photo = bool(classification == "image" and prior_file and prior_file == record["path"])
-        framing = subpart or int(classification == "reframe" or repeated_photo)
+        framing = subpart if classification != "image" else 0
         if framing and not use_diagram:
             segment["reframed"] = True
         position = min(1, max(0, elapsed / max(.1, duration))) * (len(sequence) - 1)
@@ -569,10 +576,17 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         source = sequence[index]
         if index + 1 < len(sequence) and position > index:
             source = Image.blend(source, sequence[index + 1], position - index)
-        size = OUTPUT_SIZE if portrait else native_size(WIDTH, 405 if use_diagram else 490)
-        shot = camera_shot(source, size, elapsed, duration, zoom=0 if use_diagram else .12,
-                           reframe=0 if use_diagram else framing)
-        return (place_visual(shot, native_size(0, 294), time, portrait=portrait),
+        if use_diagram:
+            shot = camera_shot(source, native_size(WIDTH, 405), elapsed, duration, zoom=0, reframe=0)
+            return (place_visual(shot, native_size(0, 294), time, portrait=False, full_bleed=False),
+                    record.get("context_label") if record else None)
+        zoom_in = photo_toggle.get(key, slot % 2 == 0)
+        zoom = .12 if classification == "image" else .04
+        segment["full_bleed"] = True
+        if classification == "image":
+            segment["ken_burns"] = "zoom_in" if zoom_in else "zoom_out"
+        shot = camera_shot(source, OUTPUT_SIZE, elapsed, duration, zoom=zoom, reframe=framing, zoom_in=zoom_in)
+        return (place_visual(shot, (0, 0), time, portrait=True, full_bleed=True),
                 record.get("context_label") if record else None)
 
     total_frames = max(1, round(seconds * FPS))
@@ -802,16 +816,36 @@ def narration(beats, seconds, voice_path, destination, *, topic=None):
 
 
 def plan_video_windows(storyboard, timeline, duration_for):
-    """Reuse suitable downloaded clips without giving two beats the same source window."""
+    """Assign non-overlapping video windows with max 2 uses per clip (non-consecutive) and max 1 use per photo."""
     planned = dict(storyboard)
     specs = {segment["beat_id"]: segment for segment in timeline}
-    videos = {key: asset for key, asset in storyboard.items() if asset["kind"] == "video"}
+    ordered_ids = list(dict.fromkeys(segment["beat_id"] for segment in timeline)) or sorted(planned)
     used_until, durations = {}, {}
-    for key, asset in videos.items():
+    video_counts, last_video_pos = {}, {}
+    used_image_paths = set()
+    videos = {}
+
+    for beat_pos, key in enumerate(ordered_ids):
+        asset = planned.get(key)
+        if not asset:
+            continue
+        if asset["kind"] == "image":
+            img_path = str(asset["path"])
+            if img_path in used_image_paths:
+                planned.pop(key, None)
+            else:
+                used_image_paths.add(img_path)
+            continue
+        if asset["kind"] != "video":
+            continue
         path = asset["path"]
         if path not in durations:
             durations[path] = duration_for(path)
         duration = durations[path]
+        prev_pos = last_video_pos.get(path)
+        if video_counts.get(path, 0) >= 2 or (prev_pos is not None and beat_pos - prev_pos < 3):
+            planned.pop(key, None)
+            continue
         start = used_until.get(path, 0)
         end = min(start + 4, duration) if duration else start + 4
         if end <= start:
@@ -819,21 +853,31 @@ def plan_video_windows(storyboard, timeline, duration_for):
             continue
         planned[key] = dict(asset, window_start=start, window_end=end)
         used_until[path] = end
-    for key, spec in specs.items():
+        video_counts[path] = video_counts.get(path, 0) + 1
+        last_video_pos[path] = beat_pos
+        videos.setdefault(key, asset)
+
+    for beat_pos, key in enumerate(ordered_ids):
+        spec = specs.get(key, {})
         previous = planned.get(key)
-        if (previous and previous["kind"] == "video") or spec.get("visual_type") in {"diagram", "callout_card"}:
+        if previous or spec.get("visual_type") in {"diagram", "callout_card"}:
             continue
         queries = [set(keywords(spec.get(field, ""))) for field in ("search_query", "fallback_video_query")]
         for source_id, asset in videos.items():
             path = asset["path"]
-            if durations[path] <= 10 or used_until[path] + 4 > durations[path]:
+            prev_pos = last_video_pos.get(path)
+            if video_counts.get(path, 0) >= 2 or (prev_pos is not None and beat_pos - prev_pos < 3):
+                continue
+            if durations[path] <= 8 or used_until[path] + 4 > durations[path]:
                 continue
             match_text = set(keywords(asset.get("match_text", "") or specs.get(source_id, {}).get("search_query", "")))
             if not any(query and len(query & match_text) >= min(2, len(query)) for query in queries):
                 continue
             start = used_until[path]
-            planned[key] = dict(asset, window_start=start, window_end=start + 4, fallback_asset=previous)
+            planned[key] = dict(asset, window_start=start, window_end=start + 4)
             used_until[path] += 4
+            video_counts[path] = video_counts.get(path, 0) + 1
+            last_video_pos[path] = beat_pos
             break
     return planned
 
@@ -869,7 +913,7 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
                 portrait = footage.is_portrait(ffmpeg, record["path"])
                 offset = record.get("window_start", 0)
                 duration = record.get("window_end", offset + 4) - offset
-                images = footage.decode_frames(ffmpeg, record["path"], 12, portrait=portrait,
+                images = footage.decode_frames(ffmpeg, record["path"], 12, portrait=portrait, full_bleed=True,
                                                offset=offset, duration=duration)
                 if not images:
                     raise ValueError("Empty clip")

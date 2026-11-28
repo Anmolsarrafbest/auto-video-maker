@@ -5,11 +5,16 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+import footage
 import instagram_publish
 import notify
 import queue_publish
+import render
 import shorts
+import storyboard
+import visuals
 import youtube
+from PIL import Image
 
 
 class AutomationTests(unittest.TestCase):
@@ -240,7 +245,9 @@ class AutomationTests(unittest.TestCase):
         self.assertTrue(topic.get("script_warnings"))
         self.assertLessEqual(sum(len(line.split()) for line in topic["beats"]), 190)
         self.assertTrue(topic["beats"][1].endswith("."))
-        self.assertEqual([b["beat_id"] for b in topic["discovery"]["beats"]], [0, 1])
+        beat_ids = [b["beat_id"] for b in topic["discovery"]["beats"]]
+        self.assertEqual(beat_ids, list(range(len(beat_ids))))
+        self.assertGreaterEqual(len(beat_ids), 6)
 
     def test_audio_driven_render_job_and_post_tts_85s_trim(self):
         with TemporaryDirectory(dir=shorts.ROOT) as directory:
@@ -346,6 +353,154 @@ class AutomationTests(unittest.TestCase):
             shorts.run_discover_batch(parsed, [], lambda: {})
         self.assertEqual(seen_seconds, [None, None])
         self.assertEqual([call.args[2] for call in render_mock.call_args_list], [None, None])
+
+    def test_render_full_bleed_videos_and_alternating_ken_burns_photos_vs_inset_diagram(self):
+        topic = {
+            "id": "visual-fullbleed", "title": "Blue light", "color": "#8DE8F7", "category": "Physics",
+            "format": "story", "opening": "statement", "scene": "discovery",
+            "discovery": {"beats": []}, "discovery_style": "field-notes", "labels": ["Blue light", "Scattering"],
+        }
+        beats = ["Watch closely.", "Blue light scatters across the sky."]
+        timings = [(0, 1), (1, 4)]
+        timeline = [
+            {"beat_id": 0, "anchor_text": "Watch closely", "search_query": "sky clip", "visual_type": "stock_video", "part": 0, "start_time": 0, "end_time": 1},
+            {"beat_id": 1, "anchor_text": "Blue light", "search_query": "sky photo one", "visual_type": "stock_video", "part": 0, "start_time": 1, "end_time": 2},
+            {"beat_id": 2, "anchor_text": "scatters across", "search_query": "sky photo two", "visual_type": "stock_video", "part": 0, "start_time": 2, "end_time": 3},
+            {"beat_id": 3, "anchor_text": "the sky", "search_query": "scatter chart", "visual_type": "diagram", "diagram": {"template": "process", "title": "Scatter", "items": [{"label": "A"}, {"label": "B"}]}, "part": 0, "start_time": 3, "end_time": 4},
+        ]
+        landscape_video = {"kind": "video", "images": [Image.new("RGB", (1920, 1080), (200, 120, 40))], "portrait": False, "path": Path("v.mp4")}
+        photo1 = {"kind": "image", "images": [Image.new("RGB", (1920, 1080), (40, 160, 220))], "portrait": False, "path": Path("p1.jpg")}
+        photo2 = {"kind": "image", "images": [Image.new("RGB", (1920, 1080), (80, 200, 140))], "portrait": False, "path": Path("p2.jpg")}
+        diagram_frame = (Image.new("RGB", (1080, 608), (240, 240, 240)),)
+        assets = {0: landscape_video, 1: photo1, 2: photo2}
+
+        with patch("render.FPS", 4):
+            out = list(render.frames(
+                topic, beats, timings, 4, visual_timeline=timeline,
+                storyboard=assets, load_visual=lambda k: assets[k], load_diagram=lambda _: diagram_frame,
+            ))
+        self.assertEqual([t["rendered_as"] for t in timeline], ["video", "image", "image", "diagram"])
+        self.assertTrue(timeline[0]["full_bleed"])
+        self.assertTrue(timeline[1]["full_bleed"])
+        self.assertTrue(timeline[2]["full_bleed"])
+        self.assertNotIn("full_bleed", timeline[3])
+        self.assertEqual(timeline[1]["ken_burns"], "zoom_in")
+        self.assertEqual(timeline[2]["ken_burns"], "zoom_out")
+        # Full-bleed edges at frame left/right fill 1080x1920 without blurred/dark inset borders
+        self.assertGreater(out[1].getpixel((5, 900))[0], 120)
+        self.assertGreater(out[6].getpixel((5, 900))[2], 120)
+        self.assertGreater(out[10].getpixel((5, 900))[1], 120)
+
+        # Verify footage.decode_frames builds exact 1080:1920 full-bleed filter
+        proc = Mock()
+        proc.stdout.read.side_effect = [b""]
+        proc.wait.return_value = 0
+        cm = Mock(__enter__=Mock(return_value=proc), __exit__=Mock(return_value=False))
+        with patch.object(footage.subprocess, "Popen", return_value=cm) as popen:
+            footage.decode_frames("ffmpeg", "clip.mp4", 30, full_bleed=True)
+        cmd = popen.call_args.args[0]
+        self.assertIn("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920", " ".join(cmd))
+
+    def test_multi_image_fallback_fills_beats_instead_of_looping_one_video(self):
+        beats = [
+            {"beat_id": i, "anchor_text": f"word {i}", "visual_type": "stock_video", "search_query": f"sloth tree {i}"}
+            for i in range(5)
+        ]
+        topic = {
+            "id": "sloth-multi", "title": "Why sloths move slowly", "category": "Nature",
+            "beats": ["Hook line.", "Explanation line."],
+            "discovery": {"subject_keywords": ["sloth", "rainforest"], "beats": beats},
+        }
+        one_video = {"id": "v1", "kind": "video", "title": "Sloth climbing", "keywords": "sloth tree", "source": "https://ex/v1", "credit": "c"}
+        photos = [
+            {"id": f"p{i}", "kind": "image", "title": f"Sloth photo {i}", "keywords": "sloth rainforest", "source": f"https://ex/p{i}", "credit": "c"}
+            for i in range(1, 6)
+        ]
+
+        def fake_rank(query, providers, *, media_type=None, **kw):
+            if media_type == "video":
+                return [one_video] if query == "sloth tree 0" else []
+            return photos
+
+        def fake_cache(_tid, record):
+            return {"file": f"{record['id']}.mp4" if record["kind"] == "video" else f"{record['id']}.jpg", **record}
+
+        with TemporaryDirectory(dir=shorts.ROOT) as directory:
+            root = Path(directory)
+            with patch.object(visuals, "CACHE", root), patch.object(visuals, "secret", return_value=""), \
+                    patch.object(visuals, "pexels_enabled", return_value=False), \
+                    patch.object(visuals, "ranked_matches", side_effect=fake_rank), \
+                    patch.object(visuals, "select_relevant_candidates", return_value={0: 0}), \
+                    patch.object(visuals, "cache", side_effect=fake_cache), \
+                    patch.object(visuals, "cache_icon", return_value=None):
+                visuals.cache_storyboard(topic)
+                manifest = visuals.read_manifest("sloth-multi")
+        assigned = [b["asset"] for b in manifest["beats"]]
+        self.assertEqual(assigned[0]["kind"], "video")
+        self.assertEqual([a["kind"] for a in assigned[1:]], ["image", "image", "image", "image"])
+        self.assertEqual(len({a["source"] for a in assigned}), 5)
+
+    def test_storyboard_caps_beat_duration_at_5_5_seconds(self):
+        words = " ".join(f"word{i}" for i in range(1, 78))
+        narration_lines = ["Start hook here.", words + "."]
+        sparse_beats = [
+            {"beat_id": 0, "anchor_text": "Start hook", "visual_type": "stock_video", "search_query": "sloth branch"},
+            {"beat_id": 1, "anchor_text": "word1 word2", "visual_type": "stock_video", "search_query": "sloth climbing"},
+        ]
+        expanded = storyboard.split_sparse_beats(sparse_beats, narration_lines, 36.0, subject_keywords=["sloth"])
+        self.assertGreaterEqual(len(expanded), 6)
+        validated = storyboard.validate_visual_beats(expanded, narration_lines, 36)
+        plan = [("hook", narration_lines[0], .14), ("answer", narration_lines[1], .25)]
+        timings = [(.14, 2.0), (2.25, 34.0)]
+        from hindi_captions import build_word_timeline
+        with patch("hindi_captions.recognized_words", return_value=[]):
+            word_lines, _ = build_word_timeline(Path("unused.wav"), "en", plan, timings)
+        timeline = storyboard.resolve_visual_timeline({"discovery": {"beats": validated}}, word_lines, plan, timings, 36)
+        for segment in timeline:
+            self.assertLessEqual(segment["end_time"] - segment["start_time"], 5.5 + 1e-8)
+
+    def test_off_topic_human_eye_rejected_for_sloth_subject(self):
+        bad_clip = {"id": "eye", "kind": "video", "title": "Human eye iris closeup", "keywords": "woman face portrait", "width": 1920, "height": 1080}
+        good_clip = {"id": "sloth", "kind": "video", "title": "Sloth resting in rainforest canopy", "keywords": "sloth wildlife eye", "width": 1080, "height": 1920}
+        with patch.object(visuals, "candidates", return_value=[bad_clip, good_clip]):
+            matches = visuals.ranked_matches(
+                "sloth eye", ["pixabay"], strict=False,
+                subject_keywords=["sloth", "rainforest"], title="How sloths see the rainforest", category="Nature",
+            )
+        self.assertEqual(matches, [good_clip])
+        anchored = shorts.normalize_discovery_beats(
+            [{"beat_id": 0, "anchor_text": "Look close", "visual_type": "stock_video", "search_query": "eye vision", "fallback_video_query": "eye"}],
+            "How sloths see", "Nature", subject_keywords=["sloth", "rainforest"],
+        )
+        self.assertIn("sloth", anchored[0]["search_query"].casefold())
+        self.assertIn("sloth", anchored[0]["fallback_video_query"].casefold())
+
+    def test_youtube_title_hashtags_fit_within_100_chars_without_truncating_words(self):
+        long_title = "This surprising ancient deep ocean hydrothermal discovery explains how bizarre ecosystems survive"
+        topic = {
+            "id": "discovered-vents",
+            "title": long_title,
+            "category": "Ocean",
+            "format": "story",
+            "beats": ["Hook sentence.", "Explanation sentence."],
+            "source": "https://example.org/ocean",
+            "aliases": ["ocean vents"],
+            "discovery": {"instagram_tags": ["#OceanScience", "#MarineBiology"], "subject_keywords": ["vents"]},
+        }
+        meta = shorts.youtube_metadata(topic)
+        self.assertLessEqual(len(meta["title"]), 100)
+        self.assertIn("#shorts", meta["title"].casefold())
+        tokens = meta["title"].split()
+        hashtags_in_title = [t for t in tokens if t.startswith("#")]
+        self.assertGreaterEqual(len(hashtags_in_title), 2)
+        for tag in hashtags_in_title:
+            self.assertGreaterEqual(len(tag), 4)
+        # Never cuts mid-word on original title prefix
+        non_tag_words = [t for t in tokens if not t.startswith("#")]
+        self.assertEqual(non_tag_words, long_title.split()[:len(non_tag_words)])
+        # Already has #shorts -> no duplicate
+        deduped = shorts.format_youtube_title("Amazing sloth facts #Shorts", ["#shorts", "#Wildlife", "#Nature"], max_len=100)
+        self.assertEqual(deduped.lower().count("#shorts"), 1)
 
 
 if __name__ == "__main__":

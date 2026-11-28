@@ -75,8 +75,11 @@ def require(response, allowed, action):
 
 def build_upload_body(meta, visibility, *, publish_at=None, now=None, check_future=True):
     """Build the YouTube Data API videos.insert snippet and status payload."""
+    raw_title = " ".join(str(meta["title"]).split())
+    if len(raw_title) > 100:
+        raw_title = raw_title[:100].rsplit(" ", 1)[0].strip() or raw_title[:100]
     content = {
-        "snippet": {"title": meta["title"], "description": meta["description"], "categoryId": "28"},
+        "snippet": {"title": raw_title, "description": meta["description"], "categoryId": "28"},
         "status": {
             "privacyStatus": visibility,
             "selfDeclaredMadeForKids": bool(meta.get("made_for_kids", False)),
