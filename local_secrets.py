@@ -28,6 +28,13 @@ def assignment(name):
     return re.compile(r"^\s*(?:export\s+)?" + re.escape(name) + r"\s*=\s*(.*)$")
 
 
+def cloudflare_credentials():
+    """Return Workers AI credentials only when both settings are present."""
+    account = secret("CLOUDFLARE_ACCOUNT_ID").strip()
+    token = secret("CLOUDFLARE_API_TOKEN").strip()
+    return (account, token) if account and token else None
+
+
 def flag(name, default=False):
     raw = secret(name).strip().lower()
     if not raw:

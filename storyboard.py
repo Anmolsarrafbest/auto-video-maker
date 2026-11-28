@@ -9,7 +9,7 @@ MIN_DURATION_SEC = 12
 MAX_DURATION_SEC = 85
 DURATIONS = (10, 12, 15, 18, 20, 25)
 DISCOVERY_DURATIONS = range(MIN_DURATION_SEC, MAX_DURATION_SEC + 1)
-VISUAL_TYPES = ("archival", "stock_video", "diagram", "callout_card")
+VISUAL_TYPES = ("archival", "stock_video", "diagram", "callout_card", "3d_render")
 DIAGRAM_TEMPLATES = ("timeline", "comparison", "process")
 MAX_VISUAL_SECONDS = 4.5
 MAX_BEAT_SECONDS = 5.5
@@ -112,6 +112,7 @@ def validate_visual_beats(beats, narration, seconds=None):
     words = anchor_tokens(" ".join(narration))
     cursor = 0
     cleaned = []
+    stat_count = 0
     for beat in beats:
         if not isinstance(beat, dict):
             raise ValueError("Each visual beat must be an object.")
@@ -136,6 +137,17 @@ def validate_visual_beats(beats, narration, seconds=None):
             raise ValueError(f"Beat {beat_id} callout must fit on one short line.")
         record = {"beat_id": beat_id, "anchor_text": anchor.strip(), "visual_type": kind,
                   "search_query": query.strip(), **({"callout_stat": stat.strip()} if stat.strip() else {})}
+        if "stat_callout" in beat:
+            callout = beat["stat_callout"]
+            if not isinstance(callout, dict) or any(
+                not isinstance(callout.get(key), str) or not 1 <= len(callout[key].strip()) <= limit
+                or any(ord(char) < 32 for char in callout[key])
+                for key, limit in (("value", 24), ("label", 32))
+            ):
+                raise ValueError(f"Beat {beat_id} needs a short stat callout value and label.")
+            if stat_count < 2:
+                record["stat_callout"] = {key: callout[key].strip() for key in ("value", "label")}
+                stat_count += 1
         fallback = beat.get("fallback_video_query", "")
         if fallback != "":
             if (not isinstance(fallback, str) or len(fallback) > 48
@@ -155,6 +167,7 @@ def visual_beat_text(beats):
         yield beat["search_query"]
         yield beat.get("fallback_video_query", "")
         yield beat.get("callout_stat", "")
+        yield from beat.get("stat_callout", {}).values()
         if diagram := beat.get("diagram"):
             yield diagram["title"]
             yield diagram["unit"]

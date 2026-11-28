@@ -1,8 +1,10 @@
 """Find and cache reviewed visual inserts from zero-cost providers."""
 
 import argparse
+import base64
 import hashlib
 from html import unescape
+import io
 from itertools import islice
 from importlib.util import find_spec
 import json
@@ -17,12 +19,16 @@ if __name__ == "__main__":
     import shorts
 
 from PIL import Image, ImageOps
+from filelock import FileLock, Timeout
 import requests
 
-from local_secrets import flag, secret
+from local_secrets import cloudflare_credentials, flag, secret
 import rate_limiter
 
 CACHE = Path(__file__).resolve().parent / "assets-cache" / "visuals"
+FLUX_CACHE = CACHE.parent / "cf_3d"
+FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+FLUX_PER_VIDEO = 4
 PIXABAY_CACHE = Path(__file__).resolve().parent / "assets-cache" / "pixabay_search_cache"
 LIMIT = 40 * 1024 * 1024
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
@@ -434,6 +440,63 @@ def cache(topic_id, record):
             "match_text": " ".join((record.get("title", ""), record.get("keywords", "")))}
 
 
+def cache_flux(topic, beat, *, allow_request=True):
+    """Resolve a synthetic illustration through the same asset contract as a photo."""
+    subject = f'{topic["title"]}: {beat["search_query"]}, showing {beat.get("anchor_text", beat["search_query"])}'
+    prompt = (
+        f"Dark matte studio 3D macro render of {subject}, subtle cyan and warm amber rim lighting, "
+        "Blender Octane photorealistic materials, shallow depth of field, center the subject for a "
+        "vertical 9:16 crop, clean negative space, no text, no watermark, no logos"
+    )
+    key = hashlib.sha256(f"{FLUX_MODEL}\n4\n{prompt}".encode("utf-8")).hexdigest()
+    path = FLUX_CACHE / f"{key}.jpg"
+    record = {
+        "file": path.name, "kind": "image", "provider": "cloudflare_flux",
+        "source": "https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/",
+        "credit": "AI illustration generated with FLUX.1 Schnell via Cloudflare Workers AI.",
+        "synthetic": True, "automatic": True, "context_label": "AI ILLUSTRATION",
+        "match_text": beat["search_query"],
+    }
+    if path.is_file():
+        return record
+    if not allow_request:
+        return None
+    credentials = cloudflare_credentials()
+    if not credentials:
+        return None
+    account, token = credentials
+    if not re.fullmatch(r"[a-fA-F0-9]{32}", account):
+        raise ValueError("Invalid Cloudflare account ID.")
+    FLUX_CACHE.mkdir(parents=True, exist_ok=True)
+    with FileLock(path.with_suffix(".lock"), timeout=90):
+        if path.is_file():
+            return record
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{FLUX_MODEL}"
+        response, _ = rate_limiter.request_with_backoff(
+            "POST", url, provider_id="cloudflare_flux", max_retries=0,
+            headers={"Authorization": f"Bearer {token}"}, json={"prompt": prompt, "steps": 4},
+            timeout=(8, 45), allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Cloudflare image generation returned HTTP {response.status_code}.")
+        result = response.json()
+        payload = result.get("result") if isinstance(result, dict) else None
+        encoded = payload.get("image") if isinstance(payload, dict) else None
+        if not isinstance(encoded, str) or len(encoded) > LIMIT * 4 // 3:
+            raise ValueError("Missing or oversized FLUX image.")
+        temporary = path.with_suffix(".part")
+        try:
+            with Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))) as source:
+                if source.width * source.height > 32_000_000:
+                    raise ValueError("This FLUX image exceeds the decode limit.")
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                ImageOps.fit(image, (1080, 1920), Image.Resampling.LANCZOS).save(temporary, "JPEG", quality=94)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return record
+
+
 def illustration_request(query):
     key = secret("POLLINATIONS_API_KEY").strip()
     model = secret("POLLINATIONS_ZERO_COST_MODEL").strip()
@@ -536,7 +599,8 @@ def read_manifest(topic_id):
 def local_asset(record):
     if not record or "file" not in record:
         return None
-    path = CACHE / Path(record["file"]).name
+    folder = FLUX_CACHE if record.get("provider") == "cloudflare_flux" else CACHE
+    path = folder / Path(record["file"]).name
     return dict(record, path=path) if path.is_file() else None
 
 
@@ -823,7 +887,7 @@ def cache_storyboard(topic, *, requests_sent=None):
     candidate_pools = {}
     for beat in requests_by_beat:
         index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
-        if shots.get(index, {}).get("kind") == "video" or not query or visual_type == "callout_card":
+        if shots.get(index, {}).get("kind") == "video" or not query or visual_type in {"callout_card", "3d_render"}:
             continue
         if visual_type == "diagram" and beat.get("diagram") and has_manim:
             continue
@@ -901,7 +965,37 @@ def cache_storyboard(topic, *, requests_sent=None):
             if shots.get(index, {}).get("kind") != "video" and fallback and normalize_query(fallback) != normalize_query(query):
                 store_match(index, search(fallback, "video", broad=True), beat_pos)
 
-    # Pass 2: fill remaining beats with distinct subject-relevant photos (max 1 use per image).
+    # Keep verified event photos ahead of any reconstruction of an archival beat.
+    if event_year:
+        for beat_pos, beat in enumerate(requests_by_beat):
+            index, query = beat["beat_id"], beat["search_query"]
+            if index not in shots and query and beat["visual_type"] == "archival":
+                archive_query = query if event_year in keywords(query) else f"{query} {event_year}"
+                store_match(index, lookup(archive_query, archives, event_year, "image"), beat_pos)
+
+    # Give explicit 3D beats first use of the image request budget.
+    flux_attempts = 0
+    for beat in sorted(requests_by_beat, key=lambda item: item["visual_type"] != "3d_render"):
+        index, query, visual_type = (beat[key] for key in ("beat_id", "search_query", "visual_type"))
+        previous = shots.get(index)
+        if (not query or visual_type == "callout_card"
+                or visual_type == "diagram" and beat.get("diagram") and has_manim
+                or previous and (previous.get("supplied") or previous.get("kind") == "video"
+                                 or previous.get("provider") == "cloudflare_flux" or event and visual_type == "archival")):
+            continue
+        try:
+            asset = cache_flux(topic, beat, allow_request=flux_attempts < FLUX_PER_VIDEO)
+        except (requests.RequestException, OSError, ValueError, TypeError, Timeout) as error:
+            flux_attempts += 1
+            print(f"FLUX unavailable ({type(error).__name__}); continuing with other visuals.", file=sys.stderr)
+            continue
+        if asset:
+            flux_attempts += 1
+            if asset["file"] not in used_files:
+                shots[index] = asset
+                used_files.add(asset["file"])
+
+    # Fill remaining beats with distinct subject-relevant photos (max 1 use per image).
     extra_topic_photos = None
     subject_photo_query = " ".join(subject_keywords[:2] or keywords(topic["title"])[:2])
     for beat_pos, beat in enumerate(requests_by_beat):
@@ -910,6 +1004,13 @@ def cache_storyboard(topic, *, requests_sent=None):
             continue
         if visual_type == "diagram" and beat.get("diagram") and has_manim:
             continue
+        if visual_type == "3d_render":
+            store_match(index, search(query, "video"), beat_pos)
+            fallback = beat.get("fallback_video_query")
+            if index not in shots and fallback and normalize_query(fallback) != normalize_query(query):
+                store_match(index, search(fallback, "video", broad=True), beat_pos)
+            if index in shots:
+                continue
         if not store_match(index, search(query, "image"), beat_pos):
             if subject_photo_query and normalize_query(subject_photo_query) != normalize_query(query):
                 if extra_topic_photos is None:

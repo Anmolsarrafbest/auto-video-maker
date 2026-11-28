@@ -98,6 +98,19 @@ idea offline, use `python spark_job.py --mode draft --offline --input spark-exam
 An explicit `shorts.py generate --discover --offline` still calls Gemini for
 the script and skips trends and visual searches.
 
+For optional FLUX studio illustrations, use a Cloudflare Workers Free
+account and a token scoped to Workers AI on that account. Set
+`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your ignored `.env`
+or add them as GitHub Actions repository secrets. Discovery and Spark
+can use FLUX when a beat requests `3d_render` or has no suitable footage.
+Generated images are cached by prompt in `assets-cache/cf_3d/` on the
+machine or runner. The resolver budgets at most four requests per Short
+and the local quota file caps requests at 24 per UTC day. Cloudflare
+enforces the shared 10,000-neuron free allocation across runners.
+Missing credentials and request failures fall back to the other media
+sources. Rendered illustrations are credited and disclosed in the
+upload metadata.
+
 Video durations are targets. Synthesized narration defaults to natural speed.
 Set `NARRATION_SPEED` in `.env` or as a GitHub Actions variable to tune it.
 The measured narration determines the export length, with two seconds reserved

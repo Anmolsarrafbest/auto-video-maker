@@ -20,6 +20,7 @@ PROVIDER_LIMITS = {
     "gemini-4-hydrogen": {"min_interval": 13.0, "daily_cap": 18, "warn_at": 15},
     "pixabay": {"min_interval": 0.7, "daily_cap": None, "warn_at": None},
     "coverr": {"min_interval": 0.5, "daily_cap": None, "warn_at": None, "hourly_cap": 50},
+    "cloudflare_flux": {"min_interval": 0.5, "daily_cap": 24, "warn_at": None},
     "internet_archive": {"min_interval": 1.0, "daily_cap": None, "warn_at": None},
     "pexels": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
     "wikimedia": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
@@ -41,7 +42,7 @@ def _load_state(today):
                 last_called = data.get("last_called", {})
                 if isinstance(counts, dict) and isinstance(last_called, dict):
                     return {"date": today, "counts": counts, "last_called": last_called,
-                            "coverr_hour": data.get("coverr_hour", [])}
+                            "coverr_hour": data.get("coverr_hour", []), "flux": data.get("flux", {})}
         except (OSError, ValueError):
             pass
     return {"date": today, "counts": {}, "last_called": {}}
@@ -71,7 +72,12 @@ def reserve_slot(provider_id, *, fallback_provider=None):
     with FileLock(QUOTA_LOCK, timeout=30):
         state = _load_state(_today())
         limits = PROVIDER_LIMITS[active]
-        count = int(state["counts"].get(active, 0))
+        flux_day = datetime.now(ZoneInfo("UTC")).date().isoformat()
+        if active == "cloudflare_flux":
+            flux = state.get("flux", {})
+            count = int(flux.get("count", 0)) if flux.get("date") == flux_day else 0
+        else:
+            count = int(state["counts"].get(active, 0))
         if limits["daily_cap"] is not None and count >= limits["daily_cap"]:
             if fallback_provider and fallback_provider in PROVIDER_LIMITS:
                 print(
@@ -104,6 +110,8 @@ def reserve_slot(provider_id, *, fallback_provider=None):
         wait_seconds = max(0.0, target - now)
         state["last_called"][active] = target
         state["counts"][active] = count + 1
+        if active == "cloudflare_flux":
+            state["flux"] = {"date": flux_day, "count": count + 1}
         _save_state(state)
     if wait_seconds > 0:
         time.sleep(wait_seconds)

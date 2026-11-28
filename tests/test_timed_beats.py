@@ -136,6 +136,7 @@ class TimedBeatsTests(unittest.TestCase):
             record = {"file": "fixture.jpg", "kind": "image", "source": "https://example.org/archive"}
             with patch.object(visuals, "CACHE", root), patch.object(visuals, "secret", return_value=""), \
                     patch.object(visuals, "ranked_matches", return_value=[record]) as rank, \
+                    patch.object(visuals, "cloudflare_credentials", return_value=None), \
                     patch.object(visuals, "cache", return_value=record), patch.object(visuals, "cache_icon", return_value=None):
                 visuals.cache_storyboard(topic)
                 selected, _ = visuals.selected_storyboard(topic)

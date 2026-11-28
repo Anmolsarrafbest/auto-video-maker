@@ -430,6 +430,7 @@ class AutomationTests(unittest.TestCase):
             with patch.object(visuals, "CACHE", root), patch.object(visuals, "secret", return_value=""), \
                     patch.object(visuals, "pexels_enabled", return_value=False), \
                     patch.object(visuals, "ranked_matches", side_effect=fake_rank), \
+                    patch.object(visuals, "cloudflare_credentials", return_value=None), \
                     patch.object(visuals, "select_relevant_candidates", return_value={0: 0}), \
                     patch.object(visuals, "cache", side_effect=fake_cache), \
                     patch.object(visuals, "cache_icon", return_value=None):

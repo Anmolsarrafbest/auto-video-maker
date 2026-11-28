@@ -486,6 +486,12 @@ def normalize_discovery_beats(beats, title, category, subject_keywords=()):
                 item.pop("fallback_video_query")
         if "callout_stat" in item:
             item["callout_stat"] = _fit_line(item.get("callout_stat"), 38)
+        callout = item.pop("stat_callout", None)
+        if isinstance(callout, dict):
+            value = _fit_line(callout.get("value"), 24)
+            label = _fit_line(callout.get("label"), 32)
+            if value and label:
+                item["stat_callout"] = {"value": value, "label": label}
         if "diagram" in item:
             if item.get("visual_type") != "diagram" or not isinstance(item.get("diagram"), dict):
                 item.pop("diagram", None)
@@ -625,9 +631,12 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
         "Also return subject_keywords: 1 to 3 core concrete nouns naming the video's main subject "
         "(for example ['sloth', 'rainforest'] or ['seismic', 'earthquake']). "
         "Anchor every beat's search_query and fallback_video_query directly to the main subject—never output bare generic words like 'eye', 'vision', or 'power' without the subject noun. "
-        "Choose visual_type from archival, stock_video, diagram, callout_card. "
+        "Choose visual_type from archival, stock_video, diagram, callout_card, 3d_render. "
         "Make at least 75 percent of beats archival or stock_video, preferably 80 percent or more. "
-        "Use at most one or two diagram or callout_card beats for ideas footage cannot show well. "
+        "Use at most one or two diagram, callout_card, or 3d_render beats for ideas footage cannot show well. "
+        "Request 3d_render for abstract or technical mechanisms, such as circuitry or internal mechanics. "
+        "On at most two beats add a sourced stat_callout with a short value (24 characters max) "
+        "and label (32 characters max). Avoid duplicating it in callout_stat. "
         "Give video beats an optional one- or two-word fallback_video_query for broader relevant footage. "
         "For a diagram beat supply diagram data with a template: timeline, comparison, or process. "
         "Give it a short title and 2–4 ordered items, each with a label. "
@@ -669,6 +678,9 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                                         "search_query": {"type": "STRING"},
                                           "fallback_video_query": {"type": "STRING"},
                                         "callout_stat": {"type": "STRING"},
+                                        "stat_callout": {"type": "OBJECT", "properties": {
+                                            "value": {"type": "STRING"}, "label": {"type": "STRING"}},
+                                            "required": ["value", "label"]},
                                         "diagram": {"type": "OBJECT", "properties": {
                                             "template": {"type": "STRING", "enum": list(DIAGRAM_TEMPLATES)},
                                             "title": {"type": "STRING"}, "unit": {"type": "STRING"},
@@ -963,6 +975,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             body, separator, tags = metadata["description"].rpartition("\n\n")
             credits = list(dict.fromkeys(f'{item["credit"]} {item["source"]}' for item in visual_credits))
             metadata["description"] = f'{body}\n\n' + "\n".join(f"Visual: {line}" for line in credits) + separator + tags
+        synthetic = any(item["synthetic"] for item in visual_credits)
         draft_metadata = {
             "topic_id": topic["id"], "selection": provenance, "duration_seconds": seconds,
             "target_duration_seconds": target_seconds, "narration_end_seconds": round(narration_end, 3),
@@ -976,7 +989,7 @@ def render_job(topic, provenance, seconds, job, use_gemini=False, *, trends=None
             "answer_pause_seconds": pause, "pinned_comment": pinned_comment(topic),
             "needs_review": bool(topic.get("discovery") or episode_plan or any(item["automatic"] for item in visual_credits)) or beats != topic["beats"],
             **({"discovery": topic["discovery"]} if "discovery" in topic else {}),
-            "made_for_kids": False, "synthetic_media": any(item["synthetic"] for item in visual_credits),
+            "made_for_kids": False, "synthetic_media": synthetic, "containsSyntheticMedia": synthetic,
         }
         from queue_publish import inspect_draft
 

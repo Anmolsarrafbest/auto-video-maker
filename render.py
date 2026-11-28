@@ -10,6 +10,7 @@ import random
 import re
 import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import wave
 
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -169,14 +170,14 @@ class SupersampledShapes:
         self.draw.line(self.points(points), fill, width * self.scale, joint="curve")
 
 
-def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0, zoom_in=True):
+def camera_shot(image, size, time, duration, zoom=.12, *, reframe=0, zoom_in=True, drift=False):
     motion = ease_cubic(time / max(.1, duration))
-    zoom_progress = motion if zoom_in else 1.0 - motion
+    zoom_progress = .58 if drift else motion if zoom_in else 1.0 - motion
     aspect = size[0] / size[1]
     width = min(image.width, image.height * aspect) / (1 + .16 * bool(reframe) + zoom * zoom_progress)
     height = width / aspect
     x = (image.width - width) * (.65 - .3 * motion if reframe % 2 else .35 + .3 * motion)
-    y = (image.height - height) * (.58 if reframe % 2 else .42)
+    y = (image.height - height) * (.58 - .16 * motion if drift else .58 if reframe % 2 else .42)
     return image.transform(size, Image.Transform.EXTENT, (x, y, x + width, y + height),
                            Image.Resampling.BICUBIC)
 
@@ -483,7 +484,8 @@ def discovery_canvas(style, base, accent, time, label, phase, icon=None):
 
 
 def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(),
-           *, visual_timeline=(), storyboard=None, load_visual=None, load_diagram=None, icon=None, credit_icon=None):
+           *, visual_timeline=(), storyboard=None, load_visual=None, load_diagram=None, icon=None, credit_icon=None,
+           animate_flux=None, transition_frames=None, ffmpeg_overlays=False):
     accent = ImageColor.getrgb(topic["color"])
     theme = treatment(topic)["theme"]
     base, _, border, caption_fill, radius = PALETTES[theme]
@@ -528,7 +530,7 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             previous_photo = key
             if key not in seen_photo_beats:
                 seen_photo_beats.add(key)
-                photo_toggle[key] = (photo_count % 2 == 0)
+                photo_toggle[key] = ("in", "out", "drift")[photo_count % 3]
                 photo_count += 1
         labels.append(segment.get("callout_stat") or segment.get("search_query")
                       or " ".join(segment["anchor_text"].split()[:5]))
@@ -580,16 +582,25 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             shot = camera_shot(source, native_size(WIDTH, 405), elapsed, duration, zoom=0, reframe=0)
             return (place_visual(shot, native_size(0, 294), time, portrait=False, full_bleed=False),
                     record.get("context_label") if record else None)
-        zoom_in = photo_toggle.get(key, slot % 2 == 0)
+        move = photo_toggle.get(key, "in" if slot % 2 == 0 else "out")
         zoom = .12 if classification == "image" else .04
         segment["full_bleed"] = True
         if classification == "image":
-            segment["ken_burns"] = "zoom_in" if zoom_in else "zoom_out"
-        shot = camera_shot(source, OUTPUT_SIZE, elapsed, duration, zoom=zoom, reframe=framing, zoom_in=zoom_in)
+            segment["ken_burns"] = {"in": "zoom_in", "out": "zoom_out", "drift": "drift"}[move]
+        shot = None
+        if animate_flux and record and record.get("provider") == "cloudflare_flux":
+            if motion_paths := animate_flux(record["path"], slot, duration, move):
+                frame = min(len(motion_paths) - 1, max(0, round(elapsed * FPS)))
+                with Image.open(motion_paths[frame]) as animated:
+                    shot = animated.convert("RGB")
+        if shot is None:
+            shot = camera_shot(source, OUTPUT_SIZE, elapsed, duration, zoom=zoom, reframe=framing,
+                               zoom_in=move == "in", drift=move == "drift")
         return (place_visual(shot, (0, 0), time, portrait=True, full_bleed=True),
                 record.get("context_label") if record else None)
 
     total_frames = max(1, round(seconds * FPS))
+    transition_slot, window, outgoing_context = None, [], None
     for index in range(total_frames):
         time = index / FPS
         recap = time >= recap_start
@@ -607,13 +618,28 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             slot = bisect_right(shot_starts, time) - 1
             active_segment = visual_timeline[slot]
             img, visual_context = discovery_shot(slot, time)
-            transition = min(.35, (active_segment["end_time"] - active_segment["start_time"]) / 2)
+            transition = min(.24, (active_segment["end_time"] - active_segment["start_time"]) / 2)
             blend = ease_cubic((time - shot_starts[slot]) / transition)
             if slot and blend < 1:
-                outgoing, outgoing_context = discovery_shot(slot - 1, time)
-                img = Image.blend(outgoing, img, blend)
+                first = math.ceil(shot_starts[slot] * FPS)
+                if transition_frames and transition_slot != slot:
+                    transition_slot = slot
+                    count = math.ceil((shot_starts[slot] + transition) * FPS) - first
+                    outgoing, outgoing_context = discovery_shot(slot - 1, shot_starts[slot])
+                    if count > 1:
+                        inputs = (discovery_shot(slot, (first + step) / FPS)[0] for step in range(count))
+                        window = transition_frames(outgoing, inputs, count, slot)
+                    else:
+                        window = []
+                if transition_slot == slot and 0 <= index - first < len(window):
+                    img = window[index - first]
+                else:
+                    outgoing, outgoing_context = discovery_shot(slot - 1, time)
+                    img = Image.blend(outgoing, img, blend)
                 if blend < .5:
                     active_segment, visual_context = visual_timeline[slot - 1], outgoing_context
+            elif window:
+                window = []
         elif opacity < 1 and diagram and beat:
             diagram_frame = min(len(diagram) - 1, max(0, round((time - reveal) * FPS)))
             if replay:
@@ -663,7 +689,8 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
         if visual_context:
             draw.text((360, 748), visual_context, font=label_font,
                       fill="#F7F3EA", anchor="mm", stroke_width=2, stroke_fill="#121827")
-        if active_segment and active_segment["rendered_as"] != "callout_card" and active_segment.get("callout_stat"):
+        if (active_segment and active_segment["rendered_as"] != "callout_card"
+                and active_segment.get("callout_stat") and not active_segment.get("stat_callout")):
             draw.text((360, 232), active_segment["callout_stat"], font=takeaway_font,
                       fill="#F7F3EA", anchor="mm", stroke_width=2, stroke_fill="#121827")
         if contextual_clip and show_clip and opacity > .5:
@@ -713,8 +740,9 @@ def frames(topic, beats, timings, seconds, archive_path=None, clip=(), diagram=(
             y = 930 + round(8 * (1 - progress) ** 3)
             draw.rounded_rectangle((145, y, 575, y + 60), radius=30, fill=base, outline=accent, width=2)
             draw.text((360, y + 30), END_CARD, font=native_font(27, True), fill="#F7F3EA", anchor="mm")
-        draw.rectangle((0, 0, WIDTH, 3), fill=base)
-        draw.rectangle((0, 0, WIDTH * (index + 1) / total_frames, 3), fill=accent)
+        if not ffmpeg_overlays:
+            draw.rectangle((0, 0, WIDTH, 3), fill=base)
+            draw.rectangle((0, 0, WIDTH * (index + 1) / total_frames, 3), fill=accent)
         yield img
 
 
@@ -882,6 +910,111 @@ def plan_video_windows(storyboard, timeline, duration_for):
     return planned
 
 
+def flux_motion_filter(count, move):
+    """Render a single still to full-length subpixel Ken Burns frames."""
+    width, height = OUTPUT_SIZE
+    position = f"on/{max(1, count - 1)}"
+    ease = f"({position})*({position})*(3-2*({position}))"
+    zoom = {"in": f"1+0.12*({ease})", "out": f"1.12-0.12*({ease})", "drift": "1.07"}[move]
+    x, y = (f".35+.30*({ease})", f".58-.16*({ease})") if move == "drift" else (".5", ".5")
+    return (
+        f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
+        f"crop={width * 2}:{height * 2},"
+        f"zoompan=z='{zoom}':x='(iw-iw/zoom)*({x})':y='(ih-ih/zoom)*({y})':"
+        f"d={count}:s={width}x{height}:fps={FPS},setsar=1"
+    )
+
+
+def render_flux_motion(ffmpeg, image, scratch, slot, duration, move):
+    directory = scratch / f"flux-motion-{slot}"
+    directory.mkdir(exist_ok=True)
+    count = max(2, math.ceil(duration * FPS) + 1)
+    result = subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-filter_threads", "2", "-i", str(image),
+         "-vf", flux_motion_filter(count, move), "-frames:v", str(count), "-q:v", "3",
+         "-threads:v", "2", str(directory / "%04d.jpg")],
+        capture_output=True,
+    )
+    paths = sorted(directory.glob("*.jpg"))
+    return paths if result.returncode == 0 and len(paths) == count else ()
+
+
+def xfade_frames(ffmpeg, outgoing, incoming, count, slot, scratch):
+    """Compose just the overlap, so narration timestamps and total runtime stay fixed."""
+    width, height = OUTPUT_SIZE
+    transition = ("fade", "smoothleft", "dissolve")[(slot - 1) % 3]
+    with TemporaryDirectory(dir=scratch, prefix="xfade-") as folder:
+        still = os.path.join(folder, "out.png")
+        incoming_path = os.path.join(folder, "in.rgb")
+        outgoing.save(still, compress_level=1)
+        with open(incoming_path, "wb") as stream:
+            for image in incoming:
+                stream.write(image.tobytes())
+        result = subprocess.run(
+            [ffmpeg, "-v", "error", "-filter_complex_threads", "2", "-loop", "1", "-framerate", str(FPS),
+             "-i", still, "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
+             "-framerate", str(FPS), "-i", incoming_path, "-filter_complex",
+             f"[0:v]format=yuv444p,setsar=1[a];[1:v]format=yuv444p,setsar=1[b];"
+             f"[a][b]xfade=transition={transition}:duration={(count - 1) / FPS:.6f}:offset=0",
+             "-frames:v", str(count), "-f", "rawvideo", "-pix_fmt", "rgb24", "-threads:v", "1", "-"],
+            capture_output=True,
+        )
+    stride = width * height * 3
+    if result.returncode or len(result.stdout) != count * stride:
+        return []
+    data = result.stdout
+    return [Image.frombytes("RGB", OUTPUT_SIZE, data[offset:offset + stride]) for offset in range(0, len(data), stride)]
+
+
+def motion_overlay_filter(scratch, timeline, seconds, color, captions, *, loop=False):
+    width, height = OUTPUT_SIZE
+    accent = "%02x%02x%02x" % ImageColor.getrgb(color)
+    total = max(2, round(seconds * FPS))
+    filters = [
+        f"color=c=0x{accent}:s={width}x6:r={FPS}:d={seconds}[progress]",
+        f"[0:v]drawbox=x=0:y=ih-6:w=iw:h=6:c=0x121827:t=fill[track]",
+        f"[track][progress]overlay=x='-w+w*clip((n-1)/{total - 1},0,1)':y=H-h:"
+        "eval=frame:shortest=1[overlaid]",
+    ]
+    overlays = []
+    seen = set()
+    for segment in timeline:
+        stat = segment.get("stat_callout")
+        key = segment["beat_id"]
+        if not stat or key in seen or len(seen) == 2:
+            continue
+        start = segment["start_time"]
+        end = min(segment["end_time"], start + 2.6, seconds if loop else seconds - OUTRO_SECONDS)
+        if end - start < .35:
+            continue
+        seen.add(key)
+        index = len(seen)
+        enable = f"enable='between(t,{start:.6f},{end:.6f})'"
+        alpha = f"alpha='clip((t-{start:.6f})/.3,0,1)*clip(({end:.6f}-t)/.18,0,1)'"
+        # Layer a few faint bands for a scrim confined to the upper left.
+        for band in range(5):
+            overlays.append(f"drawbox=x=56:y={326 + band * 25}:w=744:h=25:"
+                            f"c=0x0d1522@{.65 - band * .12:.2f}:t=fill:{enable}")
+        for field, y, size, fill in (("value", 330, 63, "0xf7f3ea"), ("label", 407, 28, "0xb6c5d0")):
+            value = stat[field] if field == "value" else stat[field].upper()
+            name = f"stat-{index}-{field}.txt"
+            (scratch / name).write_text(value, encoding="utf-8")
+            face = font(size, bold=True)
+            length = face.getlength(value)
+            size = max(14, round(size * min(1, 690 / max(1, length))))
+            path = getattr(face, "path", None)
+            font_arg = ""
+            if path and os.path.isfile(path):
+                local_font = scratch / ("stat-font" + os.path.splitext(path)[1])
+                if not local_font.exists():
+                    shutil.copyfile(path, local_font)
+                font_arg = f"fontfile={local_font.name}:"
+            overlays.append(f"drawtext={font_arg}textfile={name}:expansion=none:x=76:y={y}:"
+                            f"fontsize={size}:fontcolor={fill}:{alpha}:{enable}")
+    filters.append("[overlaid]" + ",".join([*overlays, captions]) + "[finished]")
+    return ";".join(filters)
+
+
 def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *,
            archive_path=None, use_clip=False, visual=None, storyboard=None, icon=None):
     import imageio_ffmpeg
@@ -992,17 +1125,26 @@ def encode(topic, beats, timings, seconds, wav_path, destination, poster=None, *
     theme = treatment(topic)["soundtrack"]
     mastered, audio = master(ffmpeg, wav_path, seconds, topic, theme, SCORES[theme],
                              motion_cues(topic, beats, timings, seconds), visual_timeline=visual_timeline)
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+    graphics_filter = motion_overlay_filter(
+        wav_path.parent, visual_timeline, seconds, topic["color"], caption_filter, loop=bool(topic.get("loop")))
+
+    @lru_cache(maxsize=None)
+    def animate_flux(path, slot, duration, move):
+        return render_flux_motion(ffmpeg, path, wav_path.parent, slot, duration, move)
+
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "2",
            "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}",
-           "-framerate", str(FPS), "-i", "-", "-i", str(mastered), "-map", "0:v", "-map", "1:a",
-           "-vf", caption_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+           "-framerate", str(FPS), "-i", "-", "-i", str(mastered), "-filter_complex", graphics_filter,
+           "-map", "[finished]", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
            "-pix_fmt", "yuv420p", "-threads:v", "4", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
            "-movflags", "+faststart", "-t", str(seconds), str(destination)]
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, cwd=wav_path.parent) as process:
         try:
             for image in frames(topic, beats, timings, seconds, archive_path, clip, diagram,
                                 visual_timeline=visual_timeline, storyboard=storyboard, load_visual=load_visual,
-                                load_diagram=load_diagram,
+                                load_diagram=load_diagram, animate_flux=animate_flux, ffmpeg_overlays=True,
+                                transition_frames=lambda outgoing, incoming, count, slot: xfade_frames(
+                                    ffmpeg, outgoing, incoming, count, slot, wav_path.parent),
                                 icon=icon_mask, credit_icon=lambda: credit(icon, "fallback")):
                 process.stdin.write(image.tobytes())
         except BrokenPipeError:
