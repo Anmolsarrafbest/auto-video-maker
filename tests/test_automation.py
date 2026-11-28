@@ -502,6 +502,22 @@ class AutomationTests(unittest.TestCase):
         deduped = shorts.format_youtube_title("Amazing sloth facts #Shorts", ["#shorts", "#Wildlife", "#Nature"], max_len=100)
         self.assertEqual(deduped.lower().count("#shorts"), 1)
 
+    def test_gemini_read_timeout_falls_back_to_flash_lite_and_loc_provider_registered(self):
+        import rate_limiter
+        import requests
+
+        self.assertIn("loc", rate_limiter.PROVIDER_LIMITS)
+        ok_resp = Mock(status_code=200)
+        with patch.object(rate_limiter, "reserve_slot", side_effect=["gemini-4-hydrogen", "gemini-3.1-flash-lite"]), \
+                patch.object(rate_limiter.time, "sleep"), \
+                patch.object(rate_limiter.requests, "post", side_effect=[requests.ReadTimeout("slow"), ok_resp]) as post:
+            resp, active = rate_limiter.call_gemini(
+                "key", {"contents": []}, model="gemini-4-hydrogen", fallback_model="gemini-3.1-flash-lite", timeout=90,
+            )
+        self.assertIs(resp, ok_resp)
+        self.assertEqual(active, "gemini-3.1-flash-lite")
+        self.assertIn("gemini-3.1-flash-lite", post.call_args_list[1].args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

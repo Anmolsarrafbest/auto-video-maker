@@ -24,6 +24,7 @@ PROVIDER_LIMITS = {
     "pexels": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
     "wikimedia": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
     "nasa": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
+    "loc": {"min_interval": 0.5, "daily_cap": None, "warn_at": None},
 }
 
 
@@ -111,12 +112,37 @@ def reserve_slot(provider_id, *, fallback_provider=None):
 
 def request_with_backoff(method, url, *, provider_id, fallback_provider=None, fallback_url=None,
                          max_retries=3, **kwargs):
-    """Send an HTTP request under rate-limit spacing with exponential backoff on 429/503."""
+    """Send an HTTP request under rate-limit spacing with exponential backoff and fallback on 429/503/timeouts."""
     active = reserve_slot(provider_id, fallback_provider=fallback_provider)
     target_url = fallback_url if (active != provider_id and fallback_url) else url
     sender = {"GET": requests.get, "POST": requests.post}.get(method.upper())
+    response = None
     for attempt in range(max_retries + 1):
-        response = sender(target_url, **kwargs) if sender else requests.request(method, target_url, **kwargs)
+        try:
+            response = sender(target_url, **kwargs) if sender else requests.request(method, target_url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError) as error:
+            if attempt == max_retries:
+                raise
+            delay = min(15.0, (2 ** attempt) * 1.5 + random.uniform(0.2, 0.6))
+            next_provider = (
+                fallback_provider
+                if fallback_provider and fallback_provider != active and fallback_url
+                else active
+            )
+            print(
+                f"{active} raised {type(error).__name__}; "
+                + (f"falling back to {next_provider} " if next_provider != active else "")
+                + f"retrying in {delay:.1f}s ({attempt + 1}/{max_retries}).",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            active = reserve_slot(
+                next_provider,
+                fallback_provider=fallback_provider if next_provider != fallback_provider else None,
+            )
+            if active != provider_id and fallback_url:
+                target_url = fallback_url
+            continue
         if response.status_code not in (429, 503) or attempt == max_retries:
             return response, active
         retry_after = response.headers.get("Retry-After", "").strip()

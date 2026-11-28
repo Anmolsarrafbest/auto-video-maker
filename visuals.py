@@ -792,7 +792,7 @@ def cache_storyboard(topic, *, requests_sent=None):
         stock.append("pexels")
     if secret("COVERR_API_KEY"):
         stock.append("coverr")
-    archives = ["wikimedia", "internet_archive", "loc"]
+    archives = ["wikimedia", "internet_archive"]
     if re.search(r"\b(space|planet|moon|orbit|nasa|astronom\w*|mars|earth|solar|star\w*)\b",
                  topic["category"] + " " + topic["title"], re.I):
         archives.insert(0, "nasa")

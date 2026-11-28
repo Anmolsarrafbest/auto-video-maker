@@ -660,8 +660,8 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                       "type": "OBJECT", "properties": {
                           **{name: {"type": "STRING"} for name in (*fields, "icon_query", "event_media_url", "event_year")},
                           "real_event": {"type": "BOOLEAN"},
-                          "subject_keywords": {"type": "ARRAY", "minItems": 1, "maxItems": 3, "items": {"type": "STRING"}},
-                          "beats": {"type": "ARRAY", "minItems": minimum_beats, "maxItems": 12,
+                          "subject_keywords": {"type": "ARRAY", "items": {"type": "STRING"}},
+                          "beats": {"type": "ARRAY",
                                     "items": {"type": "OBJECT", "properties": {
                                         "beat_id": {"type": "INTEGER"},
                                         "anchor_text": {"type": "STRING"},
@@ -672,7 +672,7 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                                         "diagram": {"type": "OBJECT", "properties": {
                                             "template": {"type": "STRING", "enum": list(DIAGRAM_TEMPLATES)},
                                             "title": {"type": "STRING"}, "unit": {"type": "STRING"},
-                                            "items": {"type": "ARRAY", "minItems": 2, "maxItems": 4,
+                                            "items": {"type": "ARRAY",
                                                       "items": {"type": "OBJECT", "properties": {
                                                           "label": {"type": "STRING"},
                                                           "value": {"type": "NUMBER"}},
@@ -682,9 +682,17 @@ def discover_topic(seconds, trends, previous_titles, *, subject_area=None, reque
                                       "required": [*fields, "beats", "icon_query", "real_event", "event_media_url", "event_year", "subject_keywords"]}}}
         if requests_sent is not None:
             requests_sent.append(request_body)
-        response, active_model = call_gemini(key, request_body, hq_script=hq_script, timeout=40)
+        response, active_model = call_gemini(
+            key, request_body, hq_script=hq_script, timeout=90 if hq_script else 50,
+        )
         if not response.ok:
-            raise ValueError(f"Gemini discovery failed (HTTP {response.status_code}).")
+            detail = ""
+            try:
+                msg = response.json().get("error", {}).get("message", "")
+                detail = f": {' '.join(str(msg).split())[:200]}" if msg else ""
+            except ValueError:
+                pass
+            raise ValueError(f"Gemini discovery failed (HTTP {response.status_code}{detail}).")
         try:
             parts = response.json()["candidates"][0]["content"]["parts"]
             model_output = json.loads("".join(part["text"] for part in parts if not part.get("thought")))
